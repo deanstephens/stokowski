@@ -1599,9 +1599,9 @@ def create_app(orchestrator: "MultiOrchestrator", auth_token: str = "") -> FastA
             if thread_ts and text and notifier:
                 issue_id = notifier.issue_for_thread(thread_ts)
                 if issue_id:
-                    asyncio.create_task(
-                        orchestrator.handle_thread_feedback(issue_id, text)
-                    )
+                    # Have the agent converse in-thread (falls back to filing a
+                    # comment if a conversational turn isn't possible).
+                    asyncio.create_task(orchestrator.converse(issue_id, text))
         return JSONResponse({"ok": True})
 
     # ── Interactive remote terminal ────────────────────────────────────────

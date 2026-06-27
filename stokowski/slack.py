@@ -251,6 +251,20 @@ class SlackNotifier:
         """Post a short threaded acknowledgement under an issue's gate message."""
         await self._post_message(text, thread_ts=self._issue_thread.get(issue_id))
 
+    async def post_agent_reply(self, issue_id: str, text: str) -> None:
+        """Post the agent's conversational reply into the issue's gate thread."""
+        thread_ts = self._issue_thread.get(issue_id)
+        if not thread_ts:
+            return
+        body = text.strip()
+        if len(body) > 3500:
+            body = body[:3500] + "…"
+        await self._post_message(f":robot_face: {body}", thread_ts=thread_ts)
+
+    def has_thread(self, issue_id: str) -> bool:
+        """True if a gate thread is being tracked for this issue."""
+        return issue_id in self._issue_thread
+
     # --- inbound lookup ----------------------------------------------------
 
     def issue_for_thread(self, thread_ts: str) -> str | None:

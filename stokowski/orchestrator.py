@@ -7,6 +7,7 @@ import logging
 import os
 import signal
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -28,13 +29,15 @@ from .config import (
 from .linear import LinearClient
 from .models import Issue, RetryEntry, RunAttempt
 from .pool import ConcurrencyPool
-from .prompt import assemble_prompt, build_lifecycle_section
+from .prompt import assemble_prompt, build_conversation_prompt, build_lifecycle_section
 from .runner import run_agent_turn, run_turn
 from .slack import SlackNotifier
 from .terminal import kill_session as kill_terminal_session
 from .tracking import make_gate_comment, make_state_comment, parse_latest_tracking
 from .workspace import (
+    append_conversation,
     ensure_workspace,
+    read_conversation,
     read_session_id,
     remove_workspace,
     sanitize_key,
@@ -97,6 +100,8 @@ class Orchestrator:
         self._last_error_notif: dict[str, str] = {}
         # Strong refs to fire-and-forget Slack tasks (prevent GC mid-flight).
         self._bg_tasks: set[asyncio.Task] = set()
+        # Per-issue locks serializing gate conversation turns.
+        self._convo_locks: dict[str, asyncio.Lock] = {}
         self._jinja = Environment(undefined=StrictUndefined)
         self._running = False
         self._last_issues: dict[str, Issue] = {}
@@ -1194,10 +1199,100 @@ class Orchestrator:
                 attempt=attempt_num or 1,
                 last_run_at=last_run_at,
                 comments=comments,
+                conversation=self._read_conversation(issue),
             )
 
         # Legacy fallback
         return self._render_prompt(issue, attempt_num, state_name)
+
+    def _workspace_path(self, issue: Issue) -> Path:
+        return self.cfg.workspace.resolved_root() / sanitize_key(issue.identifier)
+
+    def _read_conversation(self, issue: Issue) -> list[dict]:
+        """Read the gate conversation transcript for an issue, if any."""
+        try:
+            return read_conversation(self._workspace_path(issue))
+        except Exception:
+            return []
+
+    async def converse(
+        self, issue_id: str, human_text: str, notifier: SlackNotifier
+    ) -> bool:
+        """Run one conversational turn at a gate and reply in the Slack thread.
+
+        Resumes the issue's agent session in its workspace, read-only (no
+        Write/Edit/Bash), answers the reviewer's message, posts the reply back
+        into the thread, and records both turns in the workspace transcript so
+        later stages inherit the discussion. Returns False (so the caller can
+        fall back to filing a plain comment) if there's no workspace to talk in.
+        """
+        issue = self._last_issues.get(issue_id)
+        if issue is None:
+            return False
+        ws_path = self._workspace_path(issue)
+        if not ws_path.exists():
+            return False
+
+        # Serialize conversation turns per issue so concurrent replies don't
+        # race on the same session.
+        lock = self._convo_locks.setdefault(issue_id, asyncio.Lock())
+        async with lock:
+            history = read_conversation(ws_path)
+            append_conversation(ws_path, "human", human_text)
+
+            session_id = self._last_session_ids.get(issue_id) or read_session_id(ws_path)
+            convo_cfg = replace(
+                self.cfg.claude,
+                permission_mode="allowedTools",
+                allowed_tools=["Read", "Grep", "Glob"],
+            )
+            prompt = build_conversation_prompt(issue, human_text, history)
+            attempt = RunAttempt(
+                issue_id=issue.id,
+                issue_identifier=issue.identifier,
+                attempt=0,
+                session_id=session_id,
+            )
+
+            captured: dict[str, str] = {"text": ""}
+
+            def _capture(identifier: str, event_type: str, event: dict) -> None:
+                if event_type == "assistant":
+                    content = event.get("message", {}).get("content", "")
+                    if isinstance(content, str):
+                        captured["text"] = content
+                    elif isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                captured["text"] = block.get("text", "")
+                elif event_type == "result":
+                    r = event.get("result", "")
+                    if isinstance(r, str) and r:
+                        captured["text"] = r
+
+            logger.info(
+                f"Gate conversation turn issue={issue.identifier}",
+                extra={"linked_to": issue.identifier},
+            )
+            try:
+                attempt = await run_agent_turn(
+                    convo_cfg, HooksConfig(), prompt, ws_path, issue, attempt,
+                    on_event=_capture, env=self.cfg.agent_env(),
+                )
+            except Exception as e:
+                logger.warning(f"Gate conversation failed issue={issue.identifier}: {e}")
+                await notifier.post_agent_reply(
+                    issue_id, "(sorry — I hit an error trying to respond.)"
+                )
+                return True
+
+            reply = captured["text"].strip() or "(no response)"
+            append_conversation(ws_path, "agent", reply)
+            if attempt.session_id:
+                self._last_session_ids[issue_id] = attempt.session_id
+                write_session_id(ws_path, attempt.session_id)
+            await notifier.post_agent_reply(issue_id, reply)
+            return True
 
     def _render_prompt(
         self, issue: Issue, attempt_num: int | None, state_name: str | None = None
@@ -1841,6 +1936,22 @@ class MultiOrchestrator:
         except Exception as e:
             logger.warning(f"Slack thread feedback failed issue_id={issue_id}: {e}")
             return False
+
+    async def converse(self, issue_id: str, text: str) -> bool:
+        """Have the agent reply to a Slack thread message; record the exchange.
+
+        Falls back to filing a plain feedback comment when a conversational
+        turn isn't possible (no notifier, or no live workspace to talk in).
+        """
+        orch = self._orch_for_issue(issue_id)
+        if orch is not None and self.notifier is not None:
+            try:
+                if await orch.converse(issue_id, text, self.notifier):
+                    return True
+            except Exception as e:
+                logger.warning(f"Gate conversation errored issue_id={issue_id}: {e}")
+        # Fallback: at least capture the message as Linear feedback.
+        return await self.handle_thread_feedback(issue_id, text)
 
     def resolve_workspace(self, issue_identifier: str) -> "Path | None":
         """Resolve an issue identifier to its on-disk workspace path, if present."""
