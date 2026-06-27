@@ -24,10 +24,24 @@ mechanical stage — no new code changes.
    Linear issue and stop.
 4. Merge the PR using squash merge:
    ```
-   gh pr merge <number> --squash --delete-branch
+   gh pr merge <number> --squash
    ```
-5. Update the Linear workpad with the merge confirmation.
-6. Move the Linear issue to `Done`.
+5. Delete the feature branch and **verify it is actually gone** — do not trust
+   `--delete-branch` (or any single command) to have removed it.  Check, delete
+   if present, then re-check:
+   ```
+   # still there?  prints a ref line if the branch exists:
+   git ls-remote --heads origin <branch-name>
+   # if it printed a ref, delete the remote branch:
+   git push origin --delete <branch-name>
+   # re-verify — this MUST print nothing:
+   git ls-remote --heads origin <branch-name>
+   ```
+6. Update the Linear workpad with the merge confirmation.  Only state that the
+   branch was deleted if the final `git ls-remote` above printed **nothing**.
+   If the branch could not be removed, say so explicitly — never claim a
+   deletion you did not verify.
+7. Move the Linear issue to `Done`.
 
 ## Rework run
 
