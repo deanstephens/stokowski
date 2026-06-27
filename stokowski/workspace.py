@@ -53,6 +53,54 @@ def read_session_id(ws_path: Path) -> str | None:
     return None
 
 
+CONVERSATION_FILENAME = "conversation.jsonl"
+
+
+def append_conversation(ws_path: Path, role: str, text: str) -> None:
+    """Append one turn to the issue's gate conversation transcript.
+
+    `role` is "human" or "agent". Stored as JSON lines under the workspace's
+    `.stokowski/` dir so the discussion survives restarts and can be injected
+    into later stage prompts. Failures are non-fatal.
+    """
+    text = (text or "").strip()
+    if not text:
+        return
+    try:
+        import json
+
+        meta = ws_path / META_DIRNAME
+        meta.mkdir(parents=True, exist_ok=True)
+        with (meta / CONVERSATION_FILENAME).open("a") as f:
+            f.write(json.dumps({"role": role, "text": text}) + "\n")
+    except Exception as e:
+        logger.debug(f"could not append conversation at {ws_path}: {e}")
+
+
+def read_conversation(ws_path: Path) -> list[dict]:
+    """Read the gate conversation transcript as a list of {role, text}."""
+    import json
+
+    out: list[dict] = []
+    try:
+        p = ws_path / META_DIRNAME / CONVERSATION_FILENAME
+        if not p.exists():
+            return out
+        for line in p.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+                if isinstance(d, dict) and d.get("text"):
+                    out.append({"role": d.get("role", "human"), "text": d["text"]})
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    return out
+
+
 @dataclass
 class WorkspaceResult:
     path: Path

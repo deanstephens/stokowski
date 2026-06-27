@@ -123,6 +123,7 @@ def build_lifecycle_section(
     run: int = 1,
     is_rework: bool = False,
     recent_comments: list[dict[str, Any]] | None = None,
+    conversation: list[dict[str, Any]] | None = None,
 ) -> str:
     """Generate the auto-injected lifecycle section.
 
@@ -193,6 +194,22 @@ def build_lifecycle_section(
                     lines.append(f"> — {created}")
                 lines.append("")
 
+    # Gate discussion carried over from a Slack thread (decisions & clarifications)
+    if conversation:
+        lines.append("### Discussion at the review gate")
+        lines.append("")
+        lines.append(
+            "The following conversation happened with a human reviewer in Slack. "
+            "Treat it as context and honour any decisions made here."
+        )
+        lines.append("")
+        for turn in conversation:
+            who = "Reviewer" if turn.get("role") == "human" else "You (agent)"
+            body = (turn.get("text") or "").strip()
+            if body:
+                lines.append(f"- **{who}:** {body}")
+        lines.append("")
+
     # Available transitions
     if state_cfg.transitions:
         lines.append("### Transitions")
@@ -225,6 +242,7 @@ def assemble_prompt(
     attempt: int = 1,
     last_run_at: str | None = None,
     comments: list[dict[str, Any]] | None = None,
+    conversation: list[dict[str, Any]] | None = None,
 ) -> str:
     """Orchestrate three-layer prompt assembly.
 
@@ -299,7 +317,42 @@ def assemble_prompt(
         run=run,
         is_rework=is_rework,
         recent_comments=recent,
+        conversation=conversation,
     )
     parts.append(lifecycle)
 
     return "\n\n".join(parts)
+
+
+def build_conversation_prompt(
+    issue: Issue,
+    human_text: str,
+    history: list[dict[str, Any]] | None = None,
+) -> str:
+    """Prompt for a single conversational reply at a review gate.
+
+    The agent's own session is resumed alongside this, but the recent history
+    is included so the reply is coherent even if the session was lost. The
+    agent must answer conversationally and must NOT modify files.
+    """
+    lines = [
+        f"You are at a human review gate for **{issue.identifier}** — {issue.title}.",
+        "A reviewer is chatting with you in a Slack thread about your work.",
+        "Respond to their latest message conversationally and concisely (a few",
+        "sentences). You MAY read files in the workspace to answer accurately, but",
+        "you MUST NOT modify any files, run builds, or open/merge PRs — this is a",
+        "discussion. If they want changes made, they will click 'Request rework'.",
+        "Reply with plain prose suitable for a Slack message (no preamble).",
+        "",
+    ]
+    recent = (history or [])[-10:]
+    if recent:
+        lines.append("Conversation so far:")
+        for turn in recent:
+            who = "Reviewer" if turn.get("role") == "human" else "You"
+            lines.append(f"{who}: {(turn.get('text') or '').strip()}")
+        lines.append("")
+    lines.append(f"Reviewer: {human_text.strip()}")
+    lines.append("")
+    lines.append("Your reply:")
+    return "\n".join(lines)
