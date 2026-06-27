@@ -73,10 +73,62 @@ class AgentConfig:
     max_concurrent_per_project: dict[str, int] = field(default_factory=dict)
 
 
+def _resolve_env(value: str) -> str:
+    """Resolve a config string that may reference an env var via `$VAR` syntax."""
+    if not value:
+        return ""
+    if value.startswith("$"):
+        return os.environ.get(value[1:], "")
+    return value
+
+
 @dataclass
 class ServerConfig:
     port: int | None = None
     host: str | None = None
+    # Bearer token required on dashboard / terminal routes. May be a literal
+    # token or a `$ENV_VAR` reference. Empty means no auth (only safe on
+    # loopback). Slack callback routes are exempt (they use signature auth).
+    auth_token: str = ""
+
+    def resolved_auth_token(self) -> str:
+        token = _resolve_env(self.auth_token)
+        if not token:
+            # Fall back to a conventional env var so the token need not live
+            # in the workflow file at all.
+            return os.environ.get("STOKOWSKI_AUTH_TOKEN", "")
+        return token
+
+
+@dataclass
+class SlackConfig:
+    """Two-way Slack integration.
+
+    `bot_token`, `signing_secret`, and `channel` may be literals or `$ENV_VAR`
+    references. `events` selects which categories of notification are pushed:
+    "gates" (human-review gates + agent questions), "errors" (crashes, stalls,
+    max-rework escalations), and "done" (run completion).
+    """
+    enabled: bool = False
+    bot_token: str = ""
+    signing_secret: str = ""
+    channel: str = ""
+    events: list[str] = field(default_factory=lambda: ["gates", "errors", "done"])
+
+    def resolved_bot_token(self) -> str:
+        return _resolve_env(self.bot_token)
+
+    def resolved_signing_secret(self) -> str:
+        return _resolve_env(self.signing_secret)
+
+    def resolved_channel(self) -> str:
+        return _resolve_env(self.channel)
+
+    def is_active(self) -> bool:
+        return bool(self.enabled and self.resolved_bot_token() and self.resolved_channel())
+
+    def wants(self, category: str) -> bool:
+        return category in self.events
 
 
 @dataclass
@@ -216,6 +268,7 @@ class ServiceConfig:
     claude: ClaudeConfig = field(default_factory=ClaudeConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
+    slack: SlackConfig = field(default_factory=SlackConfig)
     linear_states: LinearStatesConfig = field(default_factory=LinearStatesConfig)
     prompts: PromptsConfig = field(default_factory=PromptsConfig)
     states: dict[str, StateConfig] = field(default_factory=dict)
@@ -540,7 +593,23 @@ def parse_workflow_file(path: str | Path) -> WorkflowDefinition:
         max_concurrent_per_project=a.get("max_concurrent_per_project") or {},
     )
     s = config_raw.get("server", {}) or {}
-    server = ServerConfig(port=s.get("port"), host=s.get("host"))
+    server = ServerConfig(
+        port=s.get("port"),
+        host=s.get("host"),
+        auth_token=str(s.get("auth_token", "") or ""),
+    )
+
+    sl = config_raw.get("slack", {}) or {}
+    slack_events = sl.get("events")
+    if not isinstance(slack_events, list) or not slack_events:
+        slack_events = ["gates", "errors", "done"]
+    slack = SlackConfig(
+        enabled=bool(sl.get("enabled", False)),
+        bot_token=str(sl.get("bot_token", "") or ""),
+        signing_secret=str(sl.get("signing_secret", "") or ""),
+        channel=str(sl.get("channel", "") or ""),
+        events=[str(e) for e in slack_events],
+    )
 
     # Resolve projects list (multi-project) or synthesize from top-level (legacy)
     projects_raw = config_raw.get("projects")
@@ -599,6 +668,7 @@ def parse_workflow_file(path: str | Path) -> WorkflowDefinition:
         claude=p0.claude,
         agent=agent,
         server=server,
+        slack=slack,
         linear_states=p0.linear_states,
         prompts=p0.prompts,
         states=p0.states,

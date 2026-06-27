@@ -319,7 +319,17 @@ def _make_footer(orch: MultiOrchestrator) -> Text:
     )
 
 
-async def run_orchestrator(workflow_path: str, host_ip: str | None = None, port: int | None = None):
+def _is_loopback_host(host: str) -> bool:
+    return host in ("127.0.0.1", "::1", "localhost", "")
+
+
+async def run_orchestrator(
+    workflow_path: str,
+    host_ip: str | None = None,
+    port: int | None = None,
+    auth_token: str | None = None,
+    insecure: bool = False,
+):
     orch = MultiOrchestrator(workflow_path)
     loop = asyncio.get_running_loop()
 
@@ -334,26 +344,54 @@ async def run_orchestrator(workflow_path: str, host_ip: str | None = None, port:
     config_host: str | None = orch.config.server.host if orch.config else None
     effective_host_ip = host_ip or config_host or "127.0.0.1"
 
+    # Resolve auth token: CLI flag > config (server.auth_token / $STOKOWSKI_AUTH_TOKEN)
+    if auth_token is not None:
+        effective_auth_token = auth_token
+    elif orch.config:
+        effective_auth_token = orch.config.server.resolved_auth_token()
+    else:
+        effective_auth_token = ""
+
     # Optional web server
     _uvicorn_server = None
     _uvicorn_task = None
     if effective_port is not None:
+        # Safety gate: refuse to expose an unauthenticated dashboard on a
+        # non-loopback interface unless the operator explicitly opts in.
+        if (
+            not effective_auth_token
+            and not _is_loopback_host(effective_host_ip)
+            and not insecure
+        ):
+            console.print(
+                f"[red]Refusing to bind {effective_host_ip}:{effective_port} without an auth "
+                f"token.[/red] Set --auth-token / server.auth_token / $STOKOWSKI_AUTH_TOKEN, "
+                f"or pass --insecure to override."
+            )
+            sys.exit(1)
         try:
             from .web import create_app
             import uvicorn
 
-            app = create_app(orch)
+            app = create_app(orch, auth_token=effective_auth_token)
             server_config = uvicorn.Config(
                 app, host=effective_host_ip, port=effective_port, log_level="warning",
             )
             _uvicorn_server = uvicorn.Server(server_config)
             _uvicorn_server.install_signal_handlers = lambda: None
             _uvicorn_task = asyncio.create_task(_uvicorn_server.serve())
+            auth_state = "auth: token" if effective_auth_token else "auth: none"
             logging.getLogger("stokowski").info(
                 f"Web dashboard started on http://{effective_host_ip}:{effective_port} "
-                f"(source={'--port' if port is not None else 'config'})"
+                f"(source={'--port' if port is not None else 'config'}, {auth_state})"
             )
-            console.print(f"[green]Web dashboard →[/green] http://{effective_host_ip}:{effective_port}")
+            url = f"http://{effective_host_ip}:{effective_port}"
+            if effective_auth_token:
+                console.print(
+                    f"[green]Web dashboard →[/green] {url}/?token=<your-token>  [dim]({auth_state})[/dim]"
+                )
+            else:
+                console.print(f"[green]Web dashboard →[/green] {url}  [dim]({auth_state})[/dim]")
         except ImportError:
             console.print(
                 "[yellow]Install web extras for dashboard: pip install stokowski[web][/yellow]"
@@ -417,6 +455,16 @@ def cli():
         help="Web dashboard port (overrides server.port in config; server would not start unless port is configured in either way)",
     )
     parser.add_argument(
+        "--auth-token",
+        default=None,
+        help="Bearer token required for dashboard/terminal access (overrides "
+        "server.auth_token in config; falls back to $STOKOWSKI_AUTH_TOKEN)",
+    )
+    parser.add_argument(
+        "--insecure", action="store_true",
+        help="Allow binding a non-loopback host without an auth token (NOT recommended)",
+    )
+    parser.add_argument(
         "--verbose", "-v", action="store_true",
         help="Enable debug logging",
     )
@@ -448,7 +496,10 @@ def cli():
         asyncio.run(dry_run(args.workflow))
     else:
         try:
-            asyncio.run(run_orchestrator(args.workflow, args.host, args.port))
+            asyncio.run(run_orchestrator(
+                args.workflow, args.host, args.port,
+                auth_token=args.auth_token, insecure=args.insecure,
+            ))
         except KeyboardInterrupt:
             console.print("\n[yellow]Interrupted — killing all agents...[/yellow]")
             _force_kill_children()
