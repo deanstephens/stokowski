@@ -149,11 +149,39 @@ prompts:
   global_prompt: prompts/global.example.md
 
 # ---------------------------------------------------------------------------
-# Server (optional web dashboard)
+# Server (optional web dashboard + interactive remote terminals)
 # ---------------------------------------------------------------------------
 server:
-  host: 127.0.0.1
+  host: 127.0.0.1          # use 0.0.0.0 to expose beyond localhost (set auth_token!)
   port: 4200
+  # Bearer token required for ALL dashboard + terminal routes (Slack callback
+  # routes are exempt — they authenticate with the Slack signing secret).
+  # A literal value or a $ENV reference. If empty, falls back to
+  # $STOKOWSKI_AUTH_TOKEN. Binding a non-loopback host without a token is
+  # refused unless you pass --insecure.
+  auth_token: $STOKOWSKI_AUTH_TOKEN
+
+# ---------------------------------------------------------------------------
+# Slack (optional, two-way)
+# ---------------------------------------------------------------------------
+# Pushes human-review gates (with Approve / Request rework buttons), agent
+# questions, error/stall escalations, and run-completion notices to a channel.
+# Clicking a button or replying in the message thread drives the issue's
+# existing Linear gate states — no separate control path.
+#
+# Setup: create a Slack app with scope `chat:write`, enable Interactivity
+# (Request URL: https://<host>/slack/interactivity) and Event Subscriptions
+# (Request URL: https://<host>/slack/events, subscribe to `message.channels`),
+# then invite the bot to the channel. See README "Slack integration".
+slack:
+  enabled: false
+  bot_token: $SLACK_BOT_TOKEN          # xoxb-... (scope: chat:write)
+  signing_secret: $SLACK_SIGNING_SECRET
+  channel: $SLACK_CHANNEL_ID           # e.g. C0123ABCD
+  events:                              # any subset of: gates, errors, done
+    - gates
+    - errors
+    - done
 
 # ---------------------------------------------------------------------------
 # State machine

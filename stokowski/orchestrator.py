@@ -30,8 +30,15 @@ from .models import Issue, RetryEntry, RunAttempt
 from .pool import ConcurrencyPool
 from .prompt import assemble_prompt, build_lifecycle_section
 from .runner import run_agent_turn, run_turn
+from .slack import SlackNotifier
 from .tracking import make_gate_comment, make_state_comment, parse_latest_tracking
-from .workspace import ensure_workspace, remove_workspace
+from .workspace import (
+    ensure_workspace,
+    read_session_id,
+    remove_workspace,
+    sanitize_key,
+    write_session_id,
+)
 
 logger = logging.getLogger("stokowski")
 
@@ -78,6 +85,17 @@ class Orchestrator:
         self._retry_timers: dict[str, asyncio.TimerHandle] = {}
         self._child_pids: set[int] = set()  # Track claude subprocess PIDs
         self._last_session_ids: dict[str, str] = {}  # issue_id -> last known session_id
+        # Last assistant/result text per issue identifier — surfaced as the
+        # agent's "question" in Slack gate notifications and run summaries.
+        self._last_agent_message: dict[str, str] = {}
+        # Slack notifier, shared across projects; set by MultiOrchestrator when
+        # Slack is configured. None disables all Slack emission.
+        self.notifier: SlackNotifier | None = None
+        # De-dupe key for the most recent error notification per issue, so a
+        # retry storm doesn't spam the channel.
+        self._last_error_notif: dict[str, str] = {}
+        # Strong refs to fire-and-forget Slack tasks (prevent GC mid-flight).
+        self._bg_tasks: set[asyncio.Task] = set()
         self._jinja = Environment(undefined=StrictUndefined)
         self._running = False
         self._last_issues: dict[str, Issue] = {}
@@ -422,6 +440,12 @@ class Orchestrator:
             extra={"linked_to": issue.identifier},
         )
 
+        if self.notifier and self.cfg.slack.wants("gates"):
+            question = self._last_agent_message.get(issue.identifier)
+            self._fire_slack(
+                self.notifier.notify_gate(issue, state_name, prompt or "", run, question)
+            )
+
     async def _safe_transition(self, issue: Issue, transition_name: str):
         """Wrapper around _transition that logs errors instead of silently swallowing them."""
         try:
@@ -488,11 +512,17 @@ class Orchestrator:
                 await remove_workspace(ws_root, issue.identifier, self.cfg.hooks)
             except Exception as e:
                 logger.warning(f"Failed to remove workspace for {issue.identifier}: {e}", extra={"linked_to": issue.identifier})
+            if self.notifier and self.cfg.slack.wants("done"):
+                summary = self._last_agent_message.get(issue.identifier, "")
+                self._fire_slack(self.notifier.notify_done(issue, summary))
+
             # Clean up tracking state
             self._issue_current_state.pop(issue.id, None)
             self._issue_state_runs.pop(issue.id, None)
             self._pending_gates.pop(issue.id, None)
             self._last_session_ids.pop(issue.id, None)
+            self._last_agent_message.pop(issue.identifier, None)
+            self._last_error_notif.pop(issue.id, None)
             self.claimed.discard(issue.id)
             self.completed.add(issue.id)
 
@@ -614,6 +644,14 @@ class Orchestrator:
                         f"gate={gate_state} run={run} max={max_rework}",
                         extra={"linked_to": issue.identifier},
                     )
+                    if self.notifier and self.cfg.slack.wants("errors"):
+                        self._fire_slack(
+                            self.notifier.notify_error(
+                                issue,
+                                f"max rework exceeded at {gate_state}",
+                                f"run {run} reached the limit of {max_rework} — needs human intervention",
+                            )
+                        )
                     continue
 
                 new_run = run + 1
@@ -938,6 +976,17 @@ class Orchestrator:
                     attempt.session_id = old.session_id
             elif issue.id in self._last_session_ids:
                 attempt.session_id = self._last_session_ids[issue.id]
+            else:
+                # Fall back to a session id persisted to the workspace on a
+                # previous run (survives orchestrator restarts).
+                try:
+                    ws_root = self.cfg.workspace.resolved_root()
+                    persisted = read_session_id(ws_root / sanitize_key(issue.identifier))
+                    if persisted:
+                        attempt.session_id = persisted
+                        self._last_session_ids[issue.id] = persisted
+                except Exception:
+                    pass
 
         self.running[issue.id] = attempt
         task = asyncio.create_task(self._run_worker(issue, attempt))
@@ -1216,6 +1265,18 @@ class Orchestrator:
         else:
             self._child_pids.discard(pid)
 
+    def _fire_slack(self, coro) -> None:
+        """Fire-and-forget a Slack notification coroutine, keeping a strong ref.
+
+        ``coro`` may be None (caller's notifier was disabled), in which case
+        this is a no-op. Network errors are swallowed inside the notifier.
+        """
+        if coro is None:
+            return
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
     def _on_agent_event(self, identifier: str, event_type: str, event: dict):
         """Callback for agent events — log notable activity to the log buffer."""
         extra = {"linked_to": identifier}
@@ -1234,10 +1295,12 @@ class Orchestrator:
                         text = block.get("text", "")
                         break
             if text:
+                self._last_agent_message[identifier] = text[:4000]
                 logger.info(f"[{identifier}] {text[:120]}", extra=extra)
         elif event_type == "result":
             result_text = event.get("result", "")
             if isinstance(result_text, str) and result_text:
+                self._last_agent_message[identifier] = result_text[:4000]
                 logger.info(f"[{identifier}] result: {result_text[:120]}", extra=extra)
         else:
             logger.debug(f"Agent event issue={identifier} type={event_type}", extra=extra)
@@ -1253,6 +1316,15 @@ class Orchestrator:
 
         if attempt.session_id:
             self._last_session_ids[issue.id] = attempt.session_id
+            # Persist so the session can be resumed after a restart or from an
+            # interactive terminal in the workspace.
+            try:
+                ws_root = self.cfg.workspace.resolved_root()
+                write_session_id(
+                    ws_root / sanitize_key(issue.identifier), attempt.session_id
+                )
+            except Exception:
+                pass
 
         completed_at = datetime.now(timezone.utc)
         attempt.completed_at = completed_at
@@ -1264,6 +1336,7 @@ class Orchestrator:
         self._release_slot(issue.id)
 
         if attempt.status == "succeeded":
+            self._last_error_notif.pop(issue.id, None)
             if attempt.state_name and attempt.state_name in self.cfg.states:
                 # State machine mode: transition via "complete"
                 asyncio.create_task(self._safe_transition(issue, "complete"))
@@ -1276,6 +1349,17 @@ class Orchestrator:
                 10_000 * (2 ** (current_attempt - 1)),
                 self.cfg.agent.max_retry_backoff_ms,
             )
+            if self.notifier and self.cfg.slack.wants("errors"):
+                # One notification per distinct (status, error) per issue —
+                # repeated identical retries stay quiet.
+                signature = f"{attempt.status}:{attempt.error or ''}"
+                if self._last_error_notif.get(issue.id) != signature:
+                    self._last_error_notif[issue.id] = signature
+                    self._fire_slack(
+                        self.notifier.notify_error(
+                            issue, attempt.status, attempt.error or ""
+                        )
+                    )
             self._schedule_retry(
                 issue,
                 attempt_num=current_attempt,
@@ -1552,6 +1636,8 @@ class MultiOrchestrator:
         self._tasks: list[asyncio.Task] = []
         self._stop_event: asyncio.Event | None = None
         self.config: "ServiceConfig | None" = None
+        # Shared Slack notifier (created in start() when Slack is configured).
+        self.notifier: SlackNotifier | None = None
         # Eagerly parse config so callers can read server.port etc. before start()
         self._initial_load()
 
@@ -1603,12 +1689,23 @@ class MultiOrchestrator:
 
         self._refresh_pool_caps()
 
+        # Build the shared Slack notifier once, if configured.
+        slack_cfg = self.config.slack if self.config else None
+        if slack_cfg and slack_cfg.is_active():
+            self.notifier = SlackNotifier(
+                bot_token=slack_cfg.resolved_bot_token(),
+                channel=slack_cfg.resolved_channel(),
+                signing_secret=slack_cfg.resolved_signing_secret(),
+            )
+            logger.info(f"Slack notifications enabled (events={slack_cfg.events})")
+
         for project in projects:
             orch = Orchestrator(
                 workflow_path=self.workflow_path,
                 project_name=project.name,
                 pool=self.pool,
             )
+            orch.notifier = self.notifier
             self.orchestrators[project.name] = orch
 
         logger.info(
@@ -1648,6 +1745,8 @@ class MultiOrchestrator:
             *(o.stop() for o in self.orchestrators.values()),
             return_exceptions=True,
         )
+        if self.notifier is not None:
+            await self.notifier.aclose()
         for t in self._tasks:
             t.cancel()
 
@@ -1676,6 +1775,81 @@ class MultiOrchestrator:
         if project_name not in self.orchestrators:
             return False
         return self.pool.toggle(project_name)
+
+    # ── Slack inbound + workspace resolution (used by web layer) ───────────
+
+    def _orch_for_issue(self, issue_id: str) -> "Orchestrator | None":
+        """Find the orchestrator that owns an issue id."""
+        for orch in self.orchestrators.values():
+            if issue_id in orch._last_issues or issue_id in orch._pending_gates:
+                return orch
+        # Single-project fallback — the issue may not be cached yet.
+        if len(self.orchestrators) == 1:
+            return next(iter(self.orchestrators.values()))
+        return None
+
+    async def apply_gate_decision(
+        self, issue_id: str, decision: str, feedback: str = ""
+    ) -> bool:
+        """Apply a Slack gate decision by driving the existing Linear states.
+
+        ``decision`` is "approve" or "rework". Moving the Linear issue into the
+        gate_approved / rework state lets the normal `_handle_gate_responses`
+        poller resume it — no parallel control path. Optional ``feedback`` is
+        posted as a comment so the agent sees it on rework.
+        """
+        orch = self._orch_for_issue(issue_id)
+        if orch is None:
+            logger.warning(f"Slack gate decision for unknown issue id={issue_id}")
+            return False
+        try:
+            client = orch._ensure_linear_client()
+            ls = orch.cfg.linear_states
+            if feedback:
+                await client.post_comment(issue_id, f"**[Slack]** {feedback}")
+            if decision == "approve":
+                target = ls.gate_approved
+            elif decision == "rework":
+                target = ls.rework
+            else:
+                logger.warning(f"Unknown Slack gate decision: {decision}")
+                return False
+            moved = await client.update_issue_state(issue_id, target)
+            if moved:
+                logger.info(
+                    f"Slack gate decision applied issue_id={issue_id} "
+                    f"decision={decision} -> {target}"
+                )
+            return moved
+        except Exception as e:
+            logger.warning(f"Slack gate decision failed issue_id={issue_id}: {e}")
+            return False
+
+    async def handle_thread_feedback(self, issue_id: str, text: str) -> bool:
+        """Attach a Slack thread reply to a Linear issue as a comment."""
+        orch = self._orch_for_issue(issue_id)
+        if orch is None:
+            return False
+        try:
+            client = orch._ensure_linear_client()
+            await client.post_comment(issue_id, f"**[Slack feedback]** {text}")
+            return True
+        except Exception as e:
+            logger.warning(f"Slack thread feedback failed issue_id={issue_id}: {e}")
+            return False
+
+    def resolve_workspace(self, issue_identifier: str) -> "Path | None":
+        """Resolve an issue identifier to its on-disk workspace path, if present."""
+        key = sanitize_key(issue_identifier)
+        for orch in self.orchestrators.values():
+            try:
+                root = orch.cfg.workspace.resolved_root()
+            except Exception:
+                continue
+            path = root / key
+            if path.exists():
+                return path
+        return None
 
     # ── Aggregated state for dashboard / status table ──────────────────────
 

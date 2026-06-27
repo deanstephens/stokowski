@@ -6,6 +6,13 @@ All notable changes to Stokowski are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- feat: **two-way Slack integration** — pushes human-review gates (with Approve / Request rework buttons), agent questions, error/stall escalations, and run-completion notices to a channel. Button clicks and thread replies drive the existing Linear gate states. Configure under `slack:` (`enabled`, `bot_token`, `signing_secret`, `channel`, `events`). New module `stokowski/slack.py`; inbound endpoints `/slack/interactivity` and `/slack/events` (verified with the Slack signing secret).
+- feat: **interactive remote terminals** — open a live tmux-backed shell into any issue's workspace from the dashboard (`/terminal/<id>`, websocket PTY bridge at `/ws/terminal/<id>`). New module `stokowski/terminal.py`. Requires `tmux` on the host.
+- feat: agent Claude Code session ids are now persisted to `.stokowski/session` in each workspace — sessions survive orchestrator restarts and can be resumed from inside the terminal (`claude --resume "$(cat .stokowski/session)"`).
+- feat: **dashboard bearer-token auth** (`server.auth_token` / `--auth-token` / `$STOKOWSKI_AUTH_TOKEN`). Stokowski refuses to bind a non-loopback host without a token unless `--insecure` is passed. Slack callback routes are exempt (signing-secret auth).
+
 ---
 
 ## [0.5.0] - 2026-06-23

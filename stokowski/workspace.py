@@ -19,6 +19,40 @@ def sanitize_key(identifier: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", identifier)
 
 
+# Per-workspace metadata lives under this hidden directory.
+META_DIRNAME = ".stokowski"
+SESSION_FILENAME = "session"
+
+
+def write_session_id(ws_path: Path, session_id: str) -> None:
+    """Persist an agent session id inside the workspace.
+
+    Lets the agent session survive an orchestrator restart and be resumed
+    from inside an interactive terminal: `claude --resume "$(cat
+    .stokowski/session)"`. Failures are non-fatal.
+    """
+    if not session_id:
+        return
+    try:
+        meta = ws_path / META_DIRNAME
+        meta.mkdir(parents=True, exist_ok=True)
+        (meta / SESSION_FILENAME).write_text(session_id.strip() + "\n")
+    except Exception as e:  # disk issues must never break the run loop
+        logger.debug(f"could not persist session id at {ws_path}: {e}")
+
+
+def read_session_id(ws_path: Path) -> str | None:
+    """Read a previously persisted agent session id, or None."""
+    try:
+        p = ws_path / META_DIRNAME / SESSION_FILENAME
+        if p.exists():
+            val = p.read_text().strip()
+            return val or None
+    except Exception:
+        pass
+    return None
+
+
 @dataclass
 class WorkspaceResult:
     path: Path

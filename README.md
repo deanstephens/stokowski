@@ -44,6 +44,9 @@ Built on [OpenAI's Symphony](https://github.com/openai/symphony) spec and taken 
 - [Getting the most out of Stokowski](#getting-the-most-out-of-stokowski)
 - [Architecture](#architecture)
 - [Upgrading](#upgrading)
+- [Slack integration](#slack-integration)
+- [Remote terminals](#remote-terminals)
+- [Remote access](#remote-access)
 - [Security](#security)
 - [License](#license)
 - [Credits](#credits)
@@ -922,11 +925,126 @@ git diff HEAD@{1} workflow.example.yaml
 
 ---
 
+## Slack integration
+
+Stokowski can push the moments that need a human — and let you respond without
+leaving Slack. It is **two-way**: review-gate messages carry **Approve** and
+**Request rework** buttons, and replying in a message thread sends feedback to
+the agent. Under the hood, a button click or thread reply just drives the
+issue's existing **Linear gate states** (`Gate Approved` / `Rework`), so there
+is no separate control path to keep in sync.
+
+**What gets posted** (choose any subset via `slack.events`):
+
+| Category | Triggers |
+| --- | --- |
+| `gates` | A human-review gate is reached. The message includes the agent's last message (its question) and Approve / Request rework buttons. |
+| `errors` | Agent crash / failure, stall or turn timeout, and max-rework escalations. De-duplicated so a retry storm doesn't spam the channel. |
+| `done` | An issue reaches a terminal state, with a short summary. |
+
+### Create the Slack app
+
+1. Create an app at <https://api.slack.com/apps> → **From scratch**.
+2. **OAuth & Permissions** → add the **Bot Token Scope** `chat:write`, install
+   the app to your workspace, and copy the **Bot User OAuth Token** (`xoxb-…`).
+3. **Basic Information** → copy the **Signing Secret**.
+4. **Interactivity & Shortcuts** → turn on, set the Request URL to
+   `https://<your-host>/slack/interactivity`.
+5. **Event Subscriptions** → turn on, set the Request URL to
+   `https://<your-host>/slack/events`, and subscribe to the bot event
+   `message.channels` (or `message.groups` for private channels).
+6. Invite the bot to your channel and copy the channel ID (`C…`).
+
+Both Request URLs require the dashboard to be reachable from Slack over HTTPS
+(see [Remote access](#remote-access)). They are authenticated by the Slack
+**signing secret**, not the dashboard auth token, so they stay reachable even
+with `auth_token` set.
+
+### Configure
+
+```yaml
+slack:
+  enabled: true
+  bot_token: $SLACK_BOT_TOKEN
+  signing_secret: $SLACK_SIGNING_SECRET
+  channel: $SLACK_CHANNEL_ID     # e.g. C0123ABCD
+  events: [gates, errors, done]
+```
+
+```bash
+export SLACK_BOT_TOKEN=xoxb-...
+export SLACK_SIGNING_SECRET=...
+export SLACK_CHANNEL_ID=C0123ABCD
+```
+
+---
+
+## Remote terminals
+
+Every active issue runs in its own git workspace. Stokowski can expose a live
+**interactive terminal** into that workspace from the dashboard — open it from
+any device, at any time. Each issue gets a persistent **tmux** session, so you
+can detach and reattach without losing state; closing the browser tab just
+detaches.
+
+Inside the terminal you have a shell in the issue's workspace: run `git diff`,
+inspect files, run tests, or resume the agent's own headless session
+interactively:
+
+```bash
+claude --resume "$(cat .stokowski/session)"
+```
+
+The agent's Claude Code session id is persisted to `.stokowski/session` in the
+workspace after each turn (it also survives orchestrator restarts).
+
+**Requirements:** `tmux` must be installed on the host
+(`brew install tmux` / `apt install tmux`). The terminal UI uses xterm.js
+loaded from a CDN. Open it from the **terminal ›** link on any agent card, or
+directly at `/terminal/<ISSUE-ID>`.
+
+---
+
+## Remote access
+
+The dashboard binds to `127.0.0.1` by default. To reach it (and the Slack
+callback URLs) from elsewhere, bind a public interface and protect it with a
+bearer token:
+
+```bash
+export STOKOWSKI_AUTH_TOKEN="$(openssl rand -hex 24)"
+stokowski --host 0.0.0.0 --port 4200 --auth-token "$STOKOWSKI_AUTH_TOKEN"
+```
+
+- All dashboard and terminal routes require the token, supplied either as
+  `Authorization: Bearer <token>` or a `?token=<token>` query parameter (the
+  browser dashboard and web terminal use the query form). Open it at
+  `http://<host>:4200/?token=<token>`.
+- `/slack/*` callback routes are **exempt** from the bearer token — they are
+  verified with the Slack signing secret instead.
+- Stokowski **refuses** to bind a non-loopback host without a token unless you
+  pass `--insecure`.
+- The token is not TLS. For real exposure, front Stokowski with a reverse proxy
+  that terminates HTTPS (required by Slack's Request URLs anyway), or a tunnel
+  such as Cloudflare Tunnel / Tailscale.
+
+Config-file equivalents live under `server:` (`host`, `port`, `auth_token`).
+CLI flags override the config; `auth_token` falls back to
+`$STOKOWSKI_AUTH_TOKEN`.
+
+---
+
 ## Security
 
+- **The dashboard has no auth by default** and binds to `127.0.0.1`. Before
+  exposing it on any shared network, set `server.auth_token` /
+  `$STOKOWSKI_AUTH_TOKEN` and front it with HTTPS. See [Remote access](#remote-access).
+- **Remote terminals grant a real shell** in an agent workspace to anyone with
+  the token. Treat the auth token as a production credential.
 - **`permission_mode: auto`** passes `--dangerously-skip-permissions` to Claude Code. Agents can execute arbitrary commands in the workspace. Only use in trusted environments or Docker containers. (Codex runs with `--quiet` which auto-approves.)
 - **`permission_mode: allowedTools`** scopes Claude Code to a specific tool list — safer for production.
-- API keys live in `workflow.yaml`, which is gitignored. They are passed to agent subprocesses as env vars automatically.
+- API keys and Slack/auth secrets live in `workflow.yaml`, which is gitignored, or in env vars. They are passed to agent subprocesses as env vars automatically.
+- Slack callbacks are verified with the signing secret (HMAC-SHA256) and reject requests older than 5 minutes (replay protection).
 - Each agent only has access to its own isolated workspace directory.
 
 ---
