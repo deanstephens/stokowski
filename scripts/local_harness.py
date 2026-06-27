@@ -97,12 +97,17 @@ class FakeOrchestrator:
 
 
 def main():
-    ws = Path(tempfile.mkdtemp(prefix="stok-demo-"))
-    # Make it a real git repo so `git diff` etc. work inside the terminal.
-    subprocess.run(["git", "init", "-q"], cwd=ws)
-    (ws / "README.md").write_text("# demo workspace\nEdit me, then run `git diff`.\n")
-    (ws / ".stokowski").mkdir(exist_ok=True)
-    (ws / ".stokowski" / "session").write_text("demo-session\n")
+    # Reuse a real workspace if given (e.g. the one claude_agent_demo.py left
+    # behind) so you can open a terminal on it and `claude --resume`.
+    existing = os.environ.get("STOK_DEMO_WORKSPACE")
+    if existing:
+        ws = Path(existing)
+    else:
+        ws = Path(tempfile.mkdtemp(prefix="stok-demo-"))
+        subprocess.run(["git", "init", "-q"], cwd=ws)
+        (ws / "README.md").write_text("# demo workspace\nEdit me, then run `git diff`.\n")
+        (ws / ".stokowski").mkdir(exist_ok=True)
+        (ws / ".stokowski" / "session").write_text("demo-session\n")
 
     app = create_app(FakeOrchestrator(ws), auth_token=TOKEN)
     print("\n" + "=" * 64)
