@@ -1,0 +1,96 @@
+# =============================================================================
+# Stokowski — Quickstart (Claude on every stage)
+# =============================================================================
+#
+# A minimal, fill-in-the-blanks workflow that runs Claude Code as the agent on
+# every stage, with the two-way Slack integration and the authenticated
+# dashboard / remote terminal enabled.
+#
+# To use:
+#   1. cp examples/quickstart.workflow.yaml workflow.yaml
+#   2. cp .env.example .env   and fill in the values
+#   3. Create the Linear states listed under `linear_states` in your project
+#   4. stokowski --dry-run     # validate
+#   5. stokowski               # run (dashboard auto-starts on server.port)
+#
+# Everything secret is read from the environment (see .env.example) — keep
+# tokens out of this file.
+
+# --- Issue tracker -----------------------------------------------------------
+tracker:
+  kind: linear
+  api_key: $LINEAR_API_KEY
+  project_slug: your-project-slug        # <-- the slug in your Linear project URL
+
+# --- Workspaces --------------------------------------------------------------
+# Per-issue git clones live here. after_create clones your repo into the
+# workspace; tune to your setup (or use a hook that does `git clone`).
+workspace:
+  root: ./.workspaces
+
+# --- Agent runtime defaults --------------------------------------------------
+claude:
+  command: claude
+  permission_mode: allowedTools          # safer than `auto`; auto-approves the listed tools
+  allowed_tools: [Bash, Read, Edit, Write, Glob, Grep]
+  model: claude-opus-4-8                 # or claude-sonnet-4-6, etc.
+  max_turns: 30
+
+agent:
+  max_concurrent_agents: 2
+
+# --- Web dashboard + remote terminals ---------------------------------------
+server:
+  host: 127.0.0.1                        # 0.0.0.0 to expose (then auth_token is required)
+  port: 4200
+  auth_token: $STOKOWSKI_AUTH_TOKEN
+
+# --- Slack (two-way) ---------------------------------------------------------
+slack:
+  enabled: true
+  bot_token: $SLACK_BOT_TOKEN
+  signing_secret: $SLACK_SIGNING_SECRET
+  channel: $SLACK_CHANNEL_ID
+  events: [gates, errors, done]
+
+# --- Linear state name mapping ----------------------------------------------
+# Rename the values to match the states in YOUR Linear workflow.
+linear_states:
+  todo: "Todo"
+  active: "In Progress"
+  review: "Human Review"
+  gate_approved: "Gate Approved"
+  rework: "Rework"
+  terminal: ["Done", "Closed", "Cancelled"]
+
+# --- Shared prompt preamble --------------------------------------------------
+prompts:
+  global_prompt: prompts/global.example.md
+
+# --- State machine -----------------------------------------------------------
+# Order matters: the first `agent` state is the entry state for new issues.
+states:
+  # 1. Implement — Claude does the work.
+  implement:
+    type: agent
+    prompt: prompts/implement.example.md
+    linear_state: active
+    runner: claude
+    session: inherit
+    transitions:
+      complete: review
+
+  # 2. Review — pause for a human. Approve in Linear OR from Slack.
+  #    Rework sends it back to `implement` (up to max_rework times).
+  review:
+    type: gate
+    linear_state: review
+    rework_to: implement
+    max_rework: 3
+    transitions:
+      approve: done
+
+  # 3. Done — terminal. Workspace is cleaned up.
+  done:
+    type: terminal
+    linear_state: terminal
