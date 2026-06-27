@@ -64,24 +64,47 @@ async def has_session(issue_identifier: str) -> bool:
     return rc == 0
 
 
+async def _session_workspace(name: str) -> str | None:
+    """Return the workspace a session was created for (tagged at creation)."""
+    rc, out = await _tmux("show-environment", "-t", name, "STOK_WS")
+    if rc != 0:
+        return None
+    # Output is "STOK_WS=/path" (or "-STOK_WS" when unset).
+    line = out.strip()
+    if line.startswith("STOK_WS="):
+        return line[len("STOK_WS="):]
+    return None
+
+
 async def ensure_session(issue_identifier: str, workspace: Path) -> str:
     """Create the issue's tmux session (rooted at `workspace`) if absent.
 
-    Returns the session name. Raises TmuxUnavailable if tmux is missing or
-    RuntimeError if the workspace path does not exist.
+    Returns the session name. If a session with this name already exists but
+    was created for a *different* workspace (e.g. a stale session left over
+    after a workspace was removed and recreated), it is killed and replaced so
+    the terminal never attaches to the wrong directory. Raises TmuxUnavailable
+    if tmux is missing or RuntimeError if the workspace path does not exist.
     """
     _require_tmux()
     if not workspace.exists():
         raise RuntimeError(f"Workspace does not exist: {workspace}")
     name = session_name(issue_identifier)
+    target = str(workspace.resolve())
     if await has_session(issue_identifier):
-        return name
+        recorded = await _session_workspace(name)
+        if recorded == target:
+            return name
+        # Stale/mismatched session — replace it.
+        logger.info(f"Replacing stale tmux session {name} (was {recorded!r})")
+        await _tmux("kill-session", "-t", name)
     rc, out = await _tmux(
-        "new-session", "-d", "-s", name, "-c", str(workspace)
+        "new-session", "-d", "-s", name, "-c", target
     )
     if rc != 0:
         raise RuntimeError(f"failed to create tmux session {name}: {out.strip()}")
-    logger.info(f"Created tmux session {name} at {workspace}")
+    # Tag the session with its workspace so future reuse can be validated.
+    await _tmux("set-environment", "-t", name, "STOK_WS", target)
+    logger.info(f"Created tmux session {name} at {target}")
     return name
 
 

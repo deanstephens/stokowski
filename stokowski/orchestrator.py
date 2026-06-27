@@ -31,6 +31,7 @@ from .pool import ConcurrencyPool
 from .prompt import assemble_prompt, build_lifecycle_section
 from .runner import run_agent_turn, run_turn
 from .slack import SlackNotifier
+from .terminal import kill_session as kill_terminal_session
 from .tracking import make_gate_comment, make_state_comment, parse_latest_tracking
 from .workspace import (
     ensure_workspace,
@@ -294,6 +295,7 @@ class Orchestrator:
             ws_root = self.cfg.workspace.resolved_root()
             for issue in terminal:
                 await remove_workspace(ws_root, issue.identifier, self.cfg.hooks)
+                await kill_terminal_session(issue.identifier)
             if terminal:
                 logger.info(f"Cleaned {len(terminal)} terminal workspaces")
         except Exception as e:
@@ -510,6 +512,7 @@ class Orchestrator:
             try:
                 ws_root = self.cfg.workspace.resolved_root()
                 await remove_workspace(ws_root, issue.identifier, self.cfg.hooks)
+                await kill_terminal_session(issue.identifier)
             except Exception as e:
                 logger.warning(f"Failed to remove workspace for {issue.identifier}: {e}", extra={"linked_to": issue.identifier})
             if self.notifier and self.cfg.slack.wants("done"):
@@ -1503,6 +1506,7 @@ class Orchestrator:
                     await remove_workspace(
                         ws_root, attempt.issue_identifier, self.cfg.hooks
                     )
+                    await kill_terminal_session(attempt.issue_identifier)
 
                 self.running.pop(issue_id, None)
                 self._tasks.pop(issue_id, None)
