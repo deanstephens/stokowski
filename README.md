@@ -44,6 +44,7 @@ Built on [OpenAI's Symphony](https://github.com/openai/symphony) spec and taken 
 - [Getting the most out of Stokowski](#getting-the-most-out-of-stokowski)
 - [Architecture](#architecture)
 - [Upgrading](#upgrading)
+- [How work lands (push / PR / merge)](#how-work-lands-push--pr--merge)
 - [Slack integration](#slack-integration)
 - [Remote terminals](#remote-terminals)
 - [Remote access](#remote-access)
@@ -922,6 +923,30 @@ pip install --upgrade git+https://github.com/Sugar-Coffee/stokowski.git#egg=stok
 ```bash
 git diff HEAD@{1} workflow.example.yaml
 ```
+
+---
+
+## How work lands (push / PR / merge)
+
+Agents work in a per-issue git clone of your repo (`hooks.after_create`), and the
+shipped stage prompts move that work onto the target repo for you:
+
+1. **`implement`** — the agent makes changes on a feature branch, pushes it, and
+   opens a PR (`prompts/implement.example.md`). On a rework run it pushes new
+   commits to the *same* PR rather than opening a second one.
+2. **`review`** — a gate. Approve (in Linear or from Slack) to proceed; request
+   rework to send it back to `implement`.
+3. **`merge`** — on approval the agent squash-merges the PR and deletes the
+   branch (`prompts/merge.example.md`), then the issue moves to `done`.
+
+`examples/quickstart.workflow.yaml` wires this full `implement → review → merge →
+done` flow. (The older minimal form went straight `review → done`, which left the
+PR open — use the merge stage to actually land the work.)
+
+**Push auth:** push and PR/merge happen from inside the workspace using your
+environment, which the agent subprocess inherits — so `git push` needs SSH (or
+HTTPS) access to the repo, and `gh` must be authenticated on the host. No tokens
+are stored in `workflow.yaml`.
 
 ---
 

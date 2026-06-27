@@ -70,7 +70,9 @@ prompts:
 # --- State machine -----------------------------------------------------------
 # Order matters: the first `agent` state is the entry state for new issues.
 states:
-  # 1. Implement — Claude does the work.
+  # 1. Implement — Claude does the work, pushes a branch, and opens a PR
+  #    (see prompts/implement.example.md). Needs git push + `gh` auth in the
+  #    agent's environment (inherited from your shell).
   implement:
     type: agent
     prompt: prompts/implement.example.md
@@ -81,16 +83,29 @@ states:
       complete: review
 
   # 2. Review — pause for a human. Approve in Linear OR from Slack.
-  #    Rework sends it back to `implement` (up to max_rework times).
+  #    Rework sends it back to `implement` (up to max_rework times); the agent
+  #    pushes new commits to the same PR.
   review:
     type: gate
     linear_state: review
     rework_to: implement
     max_rework: 3
     transitions:
-      approve: done
+      approve: merge
 
-  # 3. Done — terminal. Workspace is cleaned up.
+  # 3. Merge — land the approved PR on the target repo (squash merge + delete
+  #    branch). Short, mechanical stage; opens no new PRs.
+  merge:
+    type: agent
+    prompt: prompts/merge.example.md
+    linear_state: active
+    runner: claude
+    max_turns: 5
+    session: inherit
+    transitions:
+      complete: done
+
+  # 4. Done — terminal. Workspace is cleaned up.
   done:
     type: terminal
     linear_state: terminal
