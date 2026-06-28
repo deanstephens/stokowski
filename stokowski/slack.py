@@ -164,15 +164,87 @@ class SlackNotifier:
     on restart, threading simply resets (notifications still post).
     """
 
-    def __init__(self, bot_token: str, channel: str, signing_secret: str = ""):
+    def __init__(
+        self,
+        bot_token: str,
+        channel: str,
+        signing_secret: str = "",
+        *,
+        mentions: bool = False,
+        user_map: dict[str, str] | None = None,
+    ):
         self.bot_token = bot_token
         self.channel = channel
         self.signing_secret = signing_secret
+        self.mentions = mentions
+        # email (lowercased) -> Slack user id, manual override from config.
+        self.user_map = {k.lower(): v for k, v in (user_map or {}).items()}
         self._client: httpx.AsyncClient | None = None
         # issue_id -> thread ts of its gate message
         self._issue_thread: dict[str, str] = {}
         # thread ts -> issue_id (reverse lookup for inbound replies)
         self._thread_issue: dict[str, str] = {}
+        # thread ts -> set of Slack user ids who replied in that thread
+        self._thread_participants: dict[str, set[str]] = {}
+        # issue_id -> creator email (so follow-ups can ping the creator too)
+        self._issue_creator: dict[str, str] = {}
+        # email (lowercased) -> Slack user id | None, lookupByEmail cache
+        self._email_uid_cache: dict[str, str | None] = {}
+
+    # --- targeted-mention helpers -----------------------------------------
+
+    async def _uid_for_email(self, email: str | None) -> str | None:
+        """Resolve a Linear/email identity to a Slack user id (cached)."""
+        if not email:
+            return None
+        key = email.lower()
+        if key in self.user_map:
+            return self.user_map[key]
+        if key in self._email_uid_cache:
+            return self._email_uid_cache[key]
+        uid: str | None = None
+        try:
+            resp = await self._http().get(
+                f"{SLACK_API}/users.lookupByEmail",
+                headers={"Authorization": f"Bearer {self.bot_token}"},
+                params={"email": email},
+            )
+            data = resp.json()
+            if data.get("ok"):
+                uid = (data.get("user") or {}).get("id")
+            else:
+                logger.debug(f"users.lookupByEmail: {data.get('error')}")
+        except Exception as exc:
+            logger.warning(f"Slack user lookup failed: {exc}")
+        self._email_uid_cache[key] = uid
+        return uid
+
+    def record_participant(self, thread_ts: str, slack_uid: str) -> None:
+        """Remember a human who replied in a thread (for follow-up pings)."""
+        if thread_ts and slack_uid:
+            self._thread_participants.setdefault(thread_ts, set()).add(slack_uid)
+
+    async def mentions_for(self, issue_id: str, exclude: set[str] | None = None) -> str:
+        """Build a de-duped `<@U…> ` mention prefix for an issue's followers.
+
+        Includes the issue creator (resolved via email) and everyone who has
+        replied in its gate thread. Returns "" when mentions are disabled or
+        nobody resolves.
+        """
+        if not self.mentions:
+            return ""
+        seen: set[str] = set(exclude or [])
+        ordered: list[str] = []
+        creator_uid = await self._uid_for_email(self._issue_creator.get(issue_id))
+        thread_ts = self._issue_thread.get(issue_id, "")
+        candidates = ([creator_uid] if creator_uid else []) + sorted(
+            self._thread_participants.get(thread_ts, set())
+        )
+        for uid in candidates:
+            if uid and uid not in seen:
+                seen.add(uid)
+                ordered.append(uid)
+        return "".join(f"<@{u}> " for u in ordered)
 
     def _http(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -222,6 +294,17 @@ class SlackNotifier:
         question: str | None = None,
     ) -> None:
         text, blocks = build_gate_blocks(issue, gate_state, prompt, run, question)
+        # Remember the creator so this and later follow-ups can ping them.
+        if issue.creator_email:
+            self._issue_creator[issue.id] = issue.creator_email
+        # Ping the creator (and, on a re-review gate, prior thread participants).
+        mention = await self.mentions_for(issue.id)
+        if mention:
+            ping = f":eyes: {mention}— your issue is ready for review"
+            blocks = [
+                {"type": "section", "text": {"type": "mrkdwn", "text": ping}}
+            ] + blocks
+            text = f"{ping}\n{text}"
         ts = await self._post_message(text, blocks)
         if ts:
             self._issue_thread[issue.id] = ts
@@ -229,8 +312,11 @@ class SlackNotifier:
 
     async def notify_error(self, issue: Issue, kind: str, detail: str = "") -> None:
         title = issue.title or issue.identifier
+        if issue.creator_email:
+            self._issue_creator.setdefault(issue.id, issue.creator_email)
         text = f":rotating_light: [Stokowski] {issue.identifier} {kind}"
-        body = f":rotating_light: *{kind}* — *<{issue.url or ''}|{issue.identifier}>* {title}"
+        mention = await self.mentions_for(issue.id)
+        body = f"{mention}:rotating_light: *{kind}* — *<{issue.url or ''}|{issue.identifier}>* {title}"
         if detail:
             clipped = detail if len(detail) < 1000 else detail[:1000] + "…"
             body += f"\n```{clipped}```"
@@ -239,8 +325,11 @@ class SlackNotifier:
 
     async def notify_done(self, issue: Issue, summary: str = "") -> None:
         title = issue.title or issue.identifier
+        if issue.creator_email:
+            self._issue_creator.setdefault(issue.id, issue.creator_email)
         text = f":white_check_mark: [Stokowski] {issue.identifier} done"
-        body = f":white_check_mark: *Completed* — *<{issue.url or ''}|{issue.identifier}>* {title}"
+        mention = await self.mentions_for(issue.id)
+        body = f"{mention}:white_check_mark: *Completed* — *<{issue.url or ''}|{issue.identifier}>* {title}"
         if summary:
             clipped = summary if len(summary) < 1500 else summary[:1500] + "…"
             body += f"\n{clipped}"
@@ -259,7 +348,8 @@ class SlackNotifier:
         body = text.strip()
         if len(body) > 3500:
             body = body[:3500] + "…"
-        await self._post_message(f":robot_face: {body}", thread_ts=thread_ts)
+        mention = await self.mentions_for(issue_id)
+        await self._post_message(f"{mention}:robot_face: {body}", thread_ts=thread_ts)
 
     def has_thread(self, issue_id: str) -> bool:
         """True if a gate thread is being tracked for this issue."""

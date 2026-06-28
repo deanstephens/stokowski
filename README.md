@@ -967,11 +967,20 @@ is no separate control path to keep in sync.
 | `errors` | Agent crash / failure, stall or turn timeout, and max-rework escalations. De-duplicated so a retry storm doesn't spam the channel. |
 | `done` | An issue reaches a terminal state, with a short summary. |
 
+**Targeted mentions** (optional, `slack.mentions: true`): instead of posting
+silently to the channel, Stokowski @-mentions the **person who created the
+Linear issue** when it reaches the review gate, and pings **everyone who replied
+in the gate thread** on every follow-up (the agent's reply, the re-review gate
+after rework, error and done notices). Linear users are matched to Slack users
+by email via `users.lookupByEmail`; supply `slack.user_map` to override when the
+emails differ. Requires the extra scopes `users:read` and `users:read.email`.
+
 ### Create the Slack app
 
 1. Create an app at <https://api.slack.com/apps> → **From scratch**.
-2. **OAuth & Permissions** → add the **Bot Token Scope** `chat:write`, install
-   the app to your workspace, and copy the **Bot User OAuth Token** (`xoxb-…`).
+2. **OAuth & Permissions** → add the **Bot Token Scope** `chat:write` (and, for
+   targeted mentions, `users:read` + `users:read.email`), install the app to
+   your workspace, and copy the **Bot User OAuth Token** (`xoxb-…`).
 3. **Basic Information** → copy the **Signing Secret**.
 4. **Interactivity & Shortcuts** → turn on, set the Request URL to
    `https://<your-host>/slack/interactivity`.
@@ -994,6 +1003,9 @@ slack:
   signing_secret: $SLACK_SIGNING_SECRET
   channel: $SLACK_CHANNEL_ID     # e.g. C0123ABCD
   events: [gates, errors, done]
+  mentions: true                 # ping creator + thread participants (optional)
+  user_map:                      # optional email -> Slack id overrides
+    alice@example.com: U012ABC
 ```
 
 ```bash

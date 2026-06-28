@@ -27,6 +27,8 @@ class Issue:
     blocked_by: list[BlockerRef] = field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    creator_email: str | None = None
+    creator_name: str | None = None
 
 
 @dataclass
