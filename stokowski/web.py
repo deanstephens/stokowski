@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from .orchestrator import MultiOrchestrator
 
 try:
-    from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+    from fastapi import FastAPI, Request
     from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 except ImportError:
     raise ImportError("Install web extras: pip install stokowski[web]")
@@ -111,75 +111,6 @@ class LogCaptureHandler(logging.Handler):
             )
         except Exception:
             self.handleError(record)
-
-
-TERMINAL_HTML = """<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>stokowski terminal</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" />
-  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
-  <style>
-    html, body { margin: 0; height: 100%; background: #0b0e14; color: #c9d1d9;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-    #bar { padding: 6px 12px; font-size: 13px; border-bottom: 1px solid #1c2230;
-      display: flex; justify-content: space-between; align-items: center; }
-    #status { color: #7d8590; }
-    #term { position: absolute; top: 33px; bottom: 0; left: 0; right: 0; padding: 4px; }
-  </style>
-</head>
-<body>
-  <div id="bar">
-    <span>stokowski · <b id="issue"></b></span>
-    <span id="status">connecting…</span>
-  </div>
-  <div id="term"></div>
-  <script>
-    const ISSUE = __ISSUE__;
-    const TOKEN = __STOK_TOKEN_JSON__;
-    document.getElementById('issue').textContent = ISSUE;
-    const statusEl = document.getElementById('status');
-
-    const term = new Terminal({ cursorBlink: true, fontSize: 13,
-      theme: { background: '#0b0e14' } });
-    const fit = new FitAddon.FitAddon();
-    term.loadAddon(fit);
-    term.open(document.getElementById('term'));
-    fit.fit();
-
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    let url = proto + '://' + location.host + '/ws/terminal/' + encodeURIComponent(ISSUE);
-    if (TOKEN) url += '?token=' + encodeURIComponent(TOKEN);
-    const ws = new WebSocket(url);
-    ws.binaryType = 'arraybuffer';
-
-    function sendResize() {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'resize', rows: term.rows, cols: term.cols }));
-      }
-    }
-
-    ws.onopen = () => { statusEl.textContent = 'connected'; sendResize(); term.focus(); };
-    ws.onclose = () => { statusEl.textContent = 'disconnected'; term.write('\\r\\n[disconnected]\\r\\n'); };
-    ws.onerror = () => { statusEl.textContent = 'error'; };
-    ws.onmessage = (e) => {
-      if (typeof e.data === 'string') { term.write(e.data); }
-      else { term.write(new Uint8Array(e.data)); }
-    };
-
-    term.onData((d) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'input', data: d }));
-      }
-    });
-
-    window.addEventListener('resize', () => { fit.fit(); sendResize(); });
-  </script>
-</body>
-</html>"""
 
 
 DASHBOARD_HTML = """<!DOCTYPE html>
@@ -508,15 +439,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     color: var(--muted);
     font-weight: 300;
   }
-
-  .agent-terminal {
-    display: inline-block;
-    margin-top: 5px;
-    font-size: 0.7rem;
-    color: var(--accent, #58a6ff);
-    text-decoration: none;
-  }
-  .agent-terminal:hover { text-decoration: underline; }
 
   /* ── Projects tiles ── */
   .projects-grid {
@@ -1220,7 +1142,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <div class="agent-meta">
           <div class="agent-tokens">${fmt(r.tokens?.total_tokens || 0)} tok</div>
           <div class="agent-turns">turn ${r.turn_count || 0}</div>
-          <a class="agent-terminal" href="${tok('/terminal/' + encodeURIComponent(r.issue_identifier))}" target="_blank" rel="noopener">terminal ›</a>
         </div>
       </div>`;
     }).join('');
@@ -1679,141 +1600,6 @@ def create_app(orchestrator: "MultiOrchestrator", auth_token: str = "") -> FastA
                     asyncio.create_task(orchestrator.start_ticket_draft(idea))
         return JSONResponse({"ok": True})
 
-    # ── Interactive remote terminal ────────────────────────────────────────
-
-    @app.get("/terminal/{issue_identifier}", response_class=HTMLResponse)
-    async def terminal_page(issue_identifier: str):
-        from .terminal import tmux_available
-
-        if not tmux_available():
-            return HTMLResponse(
-                "<h2>tmux is not installed on the host</h2>"
-                "<p>Install it to use interactive terminals "
-                "(<code>brew install tmux</code> / <code>apt install tmux</code>).</p>",
-                status_code=503,
-            )
-        html = TERMINAL_HTML.replace("__ISSUE__", json.dumps(issue_identifier))
-        html = html.replace("__STOK_TOKEN_JSON__", json.dumps(auth_token or ""))
-        return HTMLResponse(html)
-
-    @app.websocket("/ws/terminal/{issue_identifier}")
-    async def ws_terminal(websocket: WebSocket, issue_identifier: str):
-        # WebSocket auth (http middleware does not cover the WS handshake).
-        if auth_token and not _token_ok(websocket.query_params.get("token", "")):
-            await websocket.close(code=1008)
-            return
-        await _serve_terminal(websocket, orchestrator, issue_identifier)
-
     return app
 
 
-async def _serve_terminal(
-    websocket: "WebSocket", orchestrator: "MultiOrchestrator", issue_identifier: str
-) -> None:
-    """Bridge a websocket to a tmux session in the issue's workspace via a PTY."""
-    import fcntl
-    import pty
-    import struct
-    import termios
-
-    from .terminal import TmuxUnavailable, ensure_session
-
-    ws_path = orchestrator.resolve_workspace(issue_identifier)
-    if ws_path is None:
-        await websocket.accept()
-        await websocket.send_bytes(
-            f"\r\n[stokowski] no workspace found for {issue_identifier}\r\n".encode()
-        )
-        await websocket.close()
-        return
-    try:
-        session = await ensure_session(issue_identifier, ws_path)
-    except (TmuxUnavailable, RuntimeError) as e:
-        await websocket.accept()
-        await websocket.send_bytes(f"\r\n[stokowski] {e}\r\n".encode())
-        await websocket.close()
-        return
-
-    await websocket.accept()
-    master_fd, slave_fd = pty.openpty()
-    proc = await asyncio.create_subprocess_exec(
-        "tmux", "attach", "-t", session,
-        stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
-        start_new_session=True,
-    )
-    os.close(slave_fd)
-    os.set_blocking(master_fd, False)
-    loop = asyncio.get_running_loop()
-    out_queue: asyncio.Queue = asyncio.Queue()
-
-    def _on_master_readable():
-        try:
-            data = os.read(master_fd, 65536)
-        except (BlockingIOError, InterruptedError):
-            return
-        except OSError:
-            data = b""
-        if data:
-            out_queue.put_nowait(data)
-        else:
-            try:
-                loop.remove_reader(master_fd)
-            except Exception:
-                pass
-            out_queue.put_nowait(None)
-
-    def _set_winsize(rows: int, cols: int) -> None:
-        try:
-            fcntl.ioctl(
-                master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0)
-            )
-        except Exception:
-            pass
-
-    loop.add_reader(master_fd, _on_master_readable)
-
-    async def _pump_to_client():
-        while True:
-            data = await out_queue.get()
-            if data is None:
-                break
-            try:
-                await websocket.send_bytes(data)
-            except Exception:
-                break
-
-    out_task = asyncio.create_task(_pump_to_client())
-    try:
-        while True:
-            raw = await websocket.receive_text()
-            try:
-                msg = json.loads(raw)
-            except ValueError:
-                continue
-            mtype = msg.get("type")
-            if mtype == "input":
-                try:
-                    os.write(master_fd, msg.get("data", "").encode())
-                except OSError:
-                    break
-            elif mtype == "resize":
-                _set_winsize(int(msg.get("rows", 24)), int(msg.get("cols", 80)))
-    except WebSocketDisconnect:
-        pass
-    except Exception:
-        pass
-    finally:
-        try:
-            loop.remove_reader(master_fd)
-        except Exception:
-            pass
-        out_task.cancel()
-        # Detach the client (the tmux session persists for later reconnects).
-        try:
-            proc.terminate()
-        except ProcessLookupError:
-            pass
-        try:
-            os.close(master_fd)
-        except OSError:
-            pass

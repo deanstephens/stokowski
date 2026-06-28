@@ -73,12 +73,3 @@ def test_slack_route_exempt_from_bearer_but_needs_signature():
     r = c.post("/slack/events", content=b"{}")
     assert r.status_code == 401
     assert "signature" in r.text.lower()
-
-
-def test_ws_terminal_rejects_without_token():
-    from starlette.websockets import WebSocketDisconnect
-
-    c = _client(auth_token="secret")
-    with pytest.raises(WebSocketDisconnect):
-        with c.websocket_connect("/ws/terminal/SYN-1"):
-            pass

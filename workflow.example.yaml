@@ -149,13 +149,13 @@ prompts:
   global_prompt: prompts/global.example.md
 
 # ---------------------------------------------------------------------------
-# Server (optional web dashboard + interactive remote terminals)
+# Server (optional web dashboard)
 # ---------------------------------------------------------------------------
 server:
   host: 127.0.0.1          # use 0.0.0.0 to expose beyond localhost (set auth_token!)
   port: 4200
-  # Bearer token required for ALL dashboard + terminal routes (Slack callback
-  # routes are exempt — they authenticate with the Slack signing secret).
+  # Bearer token required for ALL dashboard routes (Slack callback routes are
+  # exempt — they authenticate with the Slack signing secret).
   # A literal value or a $ENV reference. If empty, falls back to
   # $STOKOWSKI_AUTH_TOKEN. Binding a non-loopback host without a token is
   # refused unless you pass --insecure.
