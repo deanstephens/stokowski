@@ -634,6 +634,12 @@ class Orchestrator:
                             issue.id, "approve", source="in Linear"
                         )
                     )
+                    self._fire_slack(
+                        self.notifier.clear_gate_buttons(
+                            issue.id,
+                            note=":white_check_mark: Approved — review closed.",
+                        )
+                    )
                 await self._transition(issue, "approve")
                 logger.info(f"Gate approved issue={issue.identifier} gate={gate_state}", extra={"linked_to": issue.identifier})
 
@@ -715,6 +721,12 @@ class Orchestrator:
                             issue.id, "rework", source="in Linear"
                         )
                     )
+                    self._fire_slack(
+                        self.notifier.clear_gate_buttons(
+                            issue.id,
+                            note=":leftwards_arrow_with_hook: Sent to rework — review closed.",
+                        )
+                    )
                 logger.info(
                     f"Rework issue={issue.identifier} gate={gate_state} "
                     f"rework_to={rework_to} run={new_run}",
@@ -755,6 +767,15 @@ class Orchestrator:
                 ident = self._last_issues.get(
                     issue_id, Issue(id="", identifier=issue_id, title="")
                 ).identifier
+                # The card moved to a terminal state in Linear — drop the now
+                # stale Approve/Request rework buttons.
+                if self.notifier:
+                    self._fire_slack(
+                        self.notifier.clear_gate_buttons(
+                            issue_id,
+                            note=f":checkered_flag: Closed ({current_state}).",
+                        )
+                    )
                 logger.info(
                     f"Gate evicted issue={ident} was={gate_state} "
                     f"(moved to terminal: {current_state})",

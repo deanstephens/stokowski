@@ -20,6 +20,7 @@ All notable changes to Stokowski are documented here.
 
 ### Fixed
 
+- fix: **stale gate buttons are removed when the card is decided/moved in Linear** — once a gated issue is approved, sent to rework, or moved to a terminal state in Linear, Stokowski edits the original Slack gate message (`chat.update`) to drop the Approve / Request rework buttons (with a short "review closed" note), so nobody acts on an already-decided gate. Covers Slack-button decisions too (cleared on the next reconcile) and the re-review buttons from #14.
 - fix: **gate decisions now post to the Slack thread no matter where they happen** — approving or requesting rework by changing the issue's Linear state (not just via the Slack button) now posts the attributed `:white_check_mark: Approved` / `:leftwards_arrow_with_hook: Sent back for rework` divider into the thread (neutral "in Linear" source when there's no Slack actor). The button and Linear paths are de-duplicated so a single decision is announced exactly once.
 - fix: **re-review after rework no longer orphans a new Slack thread** — when an issue comes back from rework and re-enters the gate (`run > 1`), the notification is posted as a `:repeat: Back for review after rework` reply in the *original* thread (pinging the creator + prior participants) instead of starting a disconnected new top-level message. First reviews still start a fresh thread; falls back to a new message if the thread mapping was lost (e.g. after a restart).
 

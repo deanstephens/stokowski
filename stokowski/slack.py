@@ -193,6 +193,8 @@ class SlackNotifier:
         # issue_ids whose current gate-round decision was already announced
         # (dedupes the Slack-button and Linear-state-change paths).
         self._announced_decisions: set[str] = set()
+        # issue_id -> {ts, blocks} of the message holding the live gate buttons.
+        self._gate_message: dict[str, dict] = {}
         # email (lowercased) -> Slack user id | None, lookupByEmail cache
         self._email_uid_cache: dict[str, str | None] = {}
         # this bot's own Slack user id (for @-mention detection), cached.
@@ -341,6 +343,46 @@ class SlackNotifier:
             return None
         return data.get("ts")
 
+    async def _update_message(
+        self, ts: str, blocks: list[dict[str, Any]], text: str = "Review updated"
+    ) -> None:
+        """Edit an already-posted message in place (chat.update)."""
+        try:
+            resp = await self._http().post(
+                f"{SLACK_API}/chat.update",
+                headers={"Authorization": f"Bearer {self.bot_token}"},
+                json={
+                    "channel": self.channel,
+                    "ts": ts,
+                    "blocks": blocks,
+                    "text": text,
+                },
+            )
+            data = resp.json()
+            if not data.get("ok"):
+                logger.warning(f"Slack chat.update rejected: {data.get('error')}")
+        except Exception as exc:
+            logger.warning(f"Slack chat.update failed: {exc}")
+
+    async def clear_gate_buttons(
+        self, issue_id: str, note: str | None = None
+    ) -> None:
+        """Remove the Approve/Request rework buttons from a resolved gate.
+
+        Called when the gate is decided/moved in Linear so the stale buttons
+        can't be clicked. Best-effort and idempotent (a no-op if already
+        cleared or never tracked).
+        """
+        entry = self._gate_message.pop(issue_id, None)
+        if not entry:
+            return
+        blocks = [b for b in entry.get("blocks", []) if b.get("type") != "actions"]
+        if note:
+            blocks.append(
+                {"type": "context", "elements": [{"type": "mrkdwn", "text": note}]}
+            )
+        await self._update_message(entry["ts"], blocks)
+
     # --- outbound notifications -------------------------------------------
 
     async def _permalink(self, ts: str) -> str | None:
@@ -389,7 +431,10 @@ class SlackNotifier:
                 {"type": "section", "text": {"type": "mrkdwn", "text": header}},
             ] + blocks
             text = f"{header.replace('*', '')}\n{text}"
-            await self._post_message(text, blocks, thread_ts=existing)
+            rt = await self._post_message(text, blocks, thread_ts=existing)
+            if rt:
+                # This in-thread message now holds the live buttons.
+                self._gate_message[issue.id] = {"ts": rt, "blocks": blocks}
             return  # keep the existing thread mapping
 
         # First review: a new top-level message starts the thread.
@@ -403,6 +448,7 @@ class SlackNotifier:
         if ts:
             self._issue_thread[issue.id] = ts
             self._thread_issue[ts] = issue.id
+            self._gate_message[issue.id] = {"ts": ts, "blocks": blocks}
             # Hand back a permalink so the caller can link the Linear card to
             # this thread (the gate message already links the other way).
             if on_permalink:
