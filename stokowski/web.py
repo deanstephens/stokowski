@@ -1532,13 +1532,26 @@ def create_app(orchestrator: "MultiOrchestrator", auth_token: str = "") -> FastA
 
     # ── Slack inbound (signature-authenticated) ────────────────────────────
 
-    async def _apply_decision(issue_id: str, decision: str, feedback: str) -> None:
+    async def _apply_decision(
+        issue_id: str,
+        decision: str,
+        feedback: str,
+        actor_uid: str | None = None,
+        actor_name: str | None = None,
+    ) -> None:
         ok = await orchestrator.apply_gate_decision(issue_id, decision, feedback)
         notifier = orchestrator.notifier
         if notifier:
-            verb = "approved" if decision == "approve" else "sent back for rework"
-            note = f":white_check_mark: {verb}." if ok else ":warning: could not apply decision."
-            await notifier.acknowledge(issue_id, note)
+            # Remember the actor so follow-ups ping them too.
+            if actor_uid:
+                notifier.record_actor(issue_id, actor_uid)
+            await notifier.post_gate_decision(
+                issue_id,
+                decision,
+                actor_uid=actor_uid,
+                actor_name=actor_name,
+                ok=ok,
+            )
 
     @app.post("/slack/interactivity")
     async def slack_interactivity(request: Request):
@@ -1553,9 +1566,9 @@ def create_app(orchestrator: "MultiOrchestrator", auth_token: str = "") -> FastA
             payload = json.loads(payload_raw)
         except ValueError:
             return JSONResponse({"ok": True})
-        user = (payload.get("user") or {}).get("username") or (
-            payload.get("user") or {}
-        ).get("name") or "someone"
+        user_obj = payload.get("user") or {}
+        user_id = user_obj.get("id")
+        user = user_obj.get("username") or user_obj.get("name") or "someone"
         for action in payload.get("actions", []):
             aid = action.get("action_id")
             ctx = decode_action_value(action.get("value", ""))
@@ -1564,12 +1577,16 @@ def create_app(orchestrator: "MultiOrchestrator", auth_token: str = "") -> FastA
                 continue
             if aid == ACTION_APPROVE:
                 asyncio.create_task(
-                    _apply_decision(issue_id, "approve", f"Approved by {user} via Slack")
+                    _apply_decision(
+                        issue_id, "approve", f"Approved by {user} via Slack",
+                        actor_uid=user_id, actor_name=user,
+                    )
                 )
             elif aid == ACTION_REWORK:
                 asyncio.create_task(
                     _apply_decision(
-                        issue_id, "rework", f"Rework requested by {user} via Slack"
+                        issue_id, "rework", f"Rework requested by {user} via Slack",
+                        actor_uid=user_id, actor_name=user,
                     )
                 )
         # Acknowledge fast; Slack requires a 200 within 3 seconds.

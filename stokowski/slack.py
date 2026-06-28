@@ -340,6 +340,44 @@ class SlackNotifier:
         """Post a short threaded acknowledgement under an issue's gate message."""
         await self._post_message(text, thread_ts=self._issue_thread.get(issue_id))
 
+    def record_actor(self, issue_id: str, slack_uid: str) -> None:
+        """Record someone who acted on an issue's gate (e.g. clicked a button)."""
+        self.record_participant(self._issue_thread.get(issue_id, ""), slack_uid)
+
+    async def post_gate_decision(
+        self,
+        issue_id: str,
+        decision: str,
+        *,
+        actor_uid: str | None = None,
+        actor_name: str | None = None,
+        ok: bool = True,
+    ) -> None:
+        """Post a clearly-separated, attributed gate decision into the thread.
+
+        A `divider` block separates the round that just ended from the action
+        and whatever comes next, and the action names who took it (@-mentioning
+        them when their Slack id is known).
+        """
+        thread_ts = self._issue_thread.get(issue_id)
+        if not thread_ts:
+            return
+        if not ok:
+            headline = ":warning: *Could not apply the decision*"
+        elif decision == "approve":
+            headline = ":white_check_mark: *Approved*"
+        else:
+            headline = ":leftwards_arrow_with_hook: *Sent back for rework*"
+        if actor_uid:
+            headline += f" — by <@{actor_uid}>"
+        elif actor_name:
+            headline += f" — by {actor_name}"
+        blocks = [
+            {"type": "divider"},
+            {"type": "section", "text": {"type": "mrkdwn", "text": headline}},
+        ]
+        await self._post_message(headline.replace("*", ""), blocks, thread_ts=thread_ts)
+
     async def post_agent_reply(self, issue_id: str, text: str) -> None:
         """Post the agent's conversational reply into the issue's gate thread."""
         thread_ts = self._issue_thread.get(issue_id)
