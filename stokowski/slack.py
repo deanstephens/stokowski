@@ -188,6 +188,9 @@ class SlackNotifier:
         self._thread_participants: dict[str, set[str]] = {}
         # issue_id -> creator email (so follow-ups can ping the creator too)
         self._issue_creator: dict[str, str] = {}
+        # issue_ids whose current gate-round decision was already announced
+        # (dedupes the Slack-button and Linear-state-change paths).
+        self._announced_decisions: set[str] = set()
         # email (lowercased) -> Slack user id | None, lookupByEmail cache
         self._email_uid_cache: dict[str, str | None] = {}
 
@@ -296,6 +299,8 @@ class SlackNotifier:
         # Remember the creator so this and later follow-ups can ping them.
         if issue.creator_email:
             self._issue_creator[issue.id] = issue.creator_email
+        # New gate round → allow the next decision to be announced.
+        self._announced_decisions.discard(issue.id)
 
         text, blocks = build_gate_blocks(issue, gate_state, prompt, run, question)
         # Ping the creator (and, on a re-review, prior thread participants).
@@ -368,17 +373,27 @@ class SlackNotifier:
         *,
         actor_uid: str | None = None,
         actor_name: str | None = None,
+        source: str | None = None,
         ok: bool = True,
     ) -> None:
         """Post a clearly-separated, attributed gate decision into the thread.
 
         A `divider` block separates the round that just ended from the action
         and whatever comes next, and the action names who took it (@-mentioning
-        them when their Slack id is known).
+        them when their Slack id is known, else a neutral ``source`` like
+        "in Linear").
+
+        Idempotent per gate round: the Slack-button path and the orchestrator's
+        Linear-state-change path may both call this for the same decision, but
+        only the first announces it. The marker is reset when the gate is
+        (re-)entered (see :meth:`notify_gate`).
         """
         thread_ts = self._issue_thread.get(issue_id)
         if not thread_ts:
             return
+        if issue_id in self._announced_decisions:
+            return
+        self._announced_decisions.add(issue_id)
         if not ok:
             headline = ":warning: *Could not apply the decision*"
         elif decision == "approve":
@@ -389,6 +404,8 @@ class SlackNotifier:
             headline += f" — by <@{actor_uid}>"
         elif actor_name:
             headline += f" — by {actor_name}"
+        elif source:
+            headline += f" — {source}"
         blocks = [
             {"type": "divider"},
             {"type": "section", "text": {"type": "mrkdwn", "text": headline}},

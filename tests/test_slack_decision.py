@@ -1,7 +1,8 @@
-"""Tests for attributed, visually-separated gate decisions (#12)."""
+"""Tests for attributed, visually-separated gate decisions (#12, #16)."""
 
 import asyncio
 
+from stokowski.models import Issue
 from stokowski.slack import SlackNotifier
 
 
@@ -95,3 +96,48 @@ def test_record_actor_no_thread_is_safe():
     n = _notifier()
     n.record_actor("missing", "U1")  # must not raise
     assert n._thread_participants == {}
+
+
+# --- #16: reflect decisions from any origin, without double-posting ----------
+
+def test_neutral_source_when_no_actor():
+    # Linear-originated decision (no Slack actor) → uses the neutral source.
+    n = _notifier()
+    n._issue_thread["i1"] = "ts1"
+    _run(n.post_gate_decision("i1", "approve", source="in Linear"))
+    body = _texts(n.posts[-1]["blocks"])
+    assert "Approved" in body and "in Linear" in body and "<@" not in body
+
+
+def test_decision_announced_only_once():
+    # Slack-button path posts with actor; the orchestrator's later call for the
+    # same gate round is a no-op (dedupe).
+    n = _notifier()
+    n._issue_thread["i1"] = "ts1"
+    _run(n.post_gate_decision("i1", "approve", actor_uid="U1"))  # button
+    _run(n.post_gate_decision("i1", "approve", source="in Linear"))  # orchestrator
+    assert len(n.posts) == 1
+    assert "<@U1>" in _texts(n.posts[-1]["blocks"])  # the attributed one won
+
+
+def test_linear_only_decision_posts_once():
+    n = _notifier()
+    n._issue_thread["i1"] = "ts1"
+    _run(n.post_gate_decision("i1", "rework", source="in Linear"))
+    _run(n.post_gate_decision("i1", "rework", source="in Linear"))
+    assert len(n.posts) == 1
+
+
+def test_new_gate_round_allows_next_decision():
+    # After a decision, re-entering the gate must reset the dedupe marker so the
+    # next round's decision is announced again.
+    n = _notifier()
+    n._issue_thread["i1"] = "ts1"
+    _run(n.post_gate_decision("i1", "rework", source="in Linear"))
+    assert len(n.posts) == 1
+    # Re-review re-enters the gate (run 2), which resets the marker.
+    issue = Issue(id="i1", identifier="DEA-1", title="t", url="http://x")
+    _run(n.notify_gate(issue, "review", run=2))
+    _run(n.post_gate_decision("i1", "approve", source="in Linear"))
+    decisions = [p for p in n.posts if "Approved" in _texts(p["blocks"])]
+    assert len(decisions) == 1  # the new round's approve was announced

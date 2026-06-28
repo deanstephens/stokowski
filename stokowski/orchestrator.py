@@ -607,6 +607,16 @@ class Orchestrator:
                 # gate transitions directly to a terminal state.
                 self._issue_current_state[issue.id] = gate_state
                 self._last_issues[issue.id] = issue
+                # Reflect the decision in the Slack thread regardless of where
+                # it came from. Idempotent: a no-op if the Slack button already
+                # announced it. Posted before the transition so it precedes any
+                # terminal "Completed" notice.
+                if self.notifier:
+                    self._fire_slack(
+                        self.notifier.post_gate_decision(
+                            issue.id, "approve", source="in Linear"
+                        )
+                    )
                 await self._transition(issue, "approve")
                 logger.info(f"Gate approved issue={issue.identifier} gate={gate_state}", extra={"linked_to": issue.identifier})
 
@@ -680,6 +690,14 @@ class Orchestrator:
                 else:
                     logger.warning(f"Failed to move {issue.identifier} to active after rework", extra={"linked_to": issue.identifier})
                 self._last_issues[issue.id] = issue
+                # Reflect the rework in the Slack thread regardless of origin
+                # (idempotent — no-op if the Slack button already announced it).
+                if self.notifier:
+                    self._fire_slack(
+                        self.notifier.post_gate_decision(
+                            issue.id, "rework", source="in Linear"
+                        )
+                    )
                 logger.info(
                     f"Rework issue={issue.identifier} gate={gate_state} "
                     f"rework_to={rework_to} run={new_run}",
