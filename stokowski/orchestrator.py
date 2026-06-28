@@ -449,8 +449,25 @@ class Orchestrator:
 
         if self.notifier and self.cfg.slack.wants("gates"):
             question = self._last_agent_message.get(issue.identifier)
+
+            async def _link_card_to_thread(link: str, _issue=issue) -> None:
+                # Post the Slack thread link back onto the Linear card so the
+                # link is bidirectional. Best-effort; never fail the gate.
+                try:
+                    await self._ensure_linear_client().post_comment(
+                        _issue.id, f"💬 **Slack thread:** {link}"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to link Slack thread on {_issue.identifier}: {e}",
+                        extra={"linked_to": _issue.identifier},
+                    )
+
             self._fire_slack(
-                self.notifier.notify_gate(issue, state_name, prompt or "", run, question)
+                self.notifier.notify_gate(
+                    issue, state_name, prompt or "", run, question,
+                    on_permalink=_link_card_to_thread,
+                )
             )
 
     async def _safe_transition(self, issue: Issue, transition_name: str):
