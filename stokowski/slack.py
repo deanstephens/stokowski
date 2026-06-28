@@ -18,7 +18,7 @@ import hmac
 import json
 import logging
 import time
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import httpx
 
@@ -288,6 +288,22 @@ class SlackNotifier:
 
     # --- outbound notifications -------------------------------------------
 
+    async def _permalink(self, ts: str) -> str | None:
+        """Resolve a public permalink to a posted message (chat.getPermalink)."""
+        try:
+            resp = await self._http().get(
+                f"{SLACK_API}/chat.getPermalink",
+                headers={"Authorization": f"Bearer {self.bot_token}"},
+                params={"channel": self.channel, "message_ts": ts},
+            )
+            data = resp.json()
+            if data.get("ok"):
+                return data.get("permalink")
+            logger.debug(f"chat.getPermalink: {data.get('error')}")
+        except Exception as exc:
+            logger.warning(f"Slack permalink lookup failed: {exc}")
+        return None
+
     async def notify_gate(
         self,
         issue: Issue,
@@ -295,6 +311,7 @@ class SlackNotifier:
         prompt: str = "",
         run: int = 1,
         question: str | None = None,
+        on_permalink: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         # Remember the creator so this and later follow-ups can ping them.
         if issue.creator_email:
@@ -331,6 +348,12 @@ class SlackNotifier:
         if ts:
             self._issue_thread[issue.id] = ts
             self._thread_issue[ts] = issue.id
+            # Hand back a permalink so the caller can link the Linear card to
+            # this thread (the gate message already links the other way).
+            if on_permalink:
+                link = await self._permalink(ts)
+                if link:
+                    await on_permalink(link)
 
     async def notify_error(self, issue: Issue, kind: str, detail: str = "") -> None:
         title = issue.title or issue.identifier
