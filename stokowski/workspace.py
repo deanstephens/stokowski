@@ -27,9 +27,8 @@ SESSION_FILENAME = "session"
 def write_session_id(ws_path: Path, session_id: str) -> None:
     """Persist an agent session id inside the workspace.
 
-    Lets the agent session survive an orchestrator restart and be resumed
-    from inside an interactive terminal: `claude --resume "$(cat
-    .stokowski/session)"`. Failures are non-fatal.
+    Lets the agent session survive an orchestrator restart so a continuation
+    turn can `claude --resume` it. Failures are non-fatal.
     """
     if not session_id:
         return

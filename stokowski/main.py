@@ -457,7 +457,7 @@ def cli():
     parser.add_argument(
         "--auth-token",
         default=None,
-        help="Bearer token required for dashboard/terminal access (overrides "
+        help="Bearer token required for dashboard access (overrides "
         "server.auth_token in config; falls back to $STOKOWSKI_AUTH_TOKEN)",
     )
     parser.add_argument(

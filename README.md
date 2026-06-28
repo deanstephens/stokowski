@@ -46,7 +46,6 @@ Built on [OpenAI's Symphony](https://github.com/openai/symphony) spec and taken 
 - [Upgrading](#upgrading)
 - [How work lands (push / PR / merge)](#how-work-lands-push--pr--merge)
 - [Slack integration](#slack-integration)
-- [Remote terminals](#remote-terminals)
 - [Remote access](#remote-access)
 - [Security](#security)
 - [License](#license)
@@ -1024,32 +1023,6 @@ export SLACK_CHANNEL_ID=C0123ABCD
 
 ---
 
-## Remote terminals
-
-Every active issue runs in its own git workspace. Stokowski can expose a live
-**interactive terminal** into that workspace from the dashboard — open it from
-any device, at any time. Each issue gets a persistent **tmux** session, so you
-can detach and reattach without losing state; closing the browser tab just
-detaches.
-
-Inside the terminal you have a shell in the issue's workspace: run `git diff`,
-inspect files, run tests, or resume the agent's own headless session
-interactively:
-
-```bash
-claude --resume "$(cat .stokowski/session)"
-```
-
-The agent's Claude Code session id is persisted to `.stokowski/session` in the
-workspace after each turn (it also survives orchestrator restarts).
-
-**Requirements:** `tmux` must be installed on the host
-(`brew install tmux` / `apt install tmux`). The terminal UI uses xterm.js
-loaded from a CDN. Open it from the **terminal ›** link on any agent card, or
-directly at `/terminal/<ISSUE-ID>`.
-
----
-
 ## Remote access
 
 The dashboard binds to `127.0.0.1` by default. To reach it (and the Slack
@@ -1084,8 +1057,6 @@ CLI flags override the config; `auth_token` falls back to
 - **The dashboard has no auth by default** and binds to `127.0.0.1`. Before
   exposing it on any shared network, set `server.auth_token` /
   `$STOKOWSKI_AUTH_TOKEN` and front it with HTTPS. See [Remote access](#remote-access).
-- **Remote terminals grant a real shell** in an agent workspace to anyone with
-  the token. Treat the auth token as a production credential.
 - **`permission_mode: auto`** passes `--dangerously-skip-permissions` to Claude Code. Agents can execute arbitrary commands in the workspace. Only use in trusted environments or Docker containers. (Codex runs with `--quiet` which auto-approves.)
 - **`permission_mode: allowedTools`** scopes Claude Code to a specific tool list — safer for production.
 - API keys and Slack/auth secrets live in `workflow.yaml`, which is gitignored, or in env vars. They are passed to agent subprocesses as env vars automatically.
