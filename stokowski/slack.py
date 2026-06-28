@@ -31,6 +31,8 @@ SLACK_API = "https://slack.com/api"
 # action_id values for the interactive buttons.
 ACTION_APPROVE = "stokowski_approve"
 ACTION_REWORK = "stokowski_rework"
+ACTION_CREATE_TICKET = "stokowski_create_ticket"
+ACTION_CANCEL_TICKET = "stokowski_cancel_ticket"
 
 
 def encode_action_value(issue_id: str, gate: str, run: int) -> str:
@@ -193,6 +195,59 @@ class SlackNotifier:
         self._announced_decisions: set[str] = set()
         # email (lowercased) -> Slack user id | None, lookupByEmail cache
         self._email_uid_cache: dict[str, str | None] = {}
+        # this bot's own Slack user id (for @-mention detection), cached.
+        self.bot_user_id: str | None = None
+
+    async def bot_id(self) -> str | None:
+        """Resolve (and cache) this bot's own Slack user id via auth.test."""
+        if self.bot_user_id is None:
+            try:
+                resp = await self._http().get(
+                    f"{SLACK_API}/auth.test",
+                    headers={"Authorization": f"Bearer {self.bot_token}"},
+                )
+                data = resp.json()
+                if data.get("ok"):
+                    self.bot_user_id = data.get("user_id")
+            except Exception as exc:
+                logger.warning(f"Slack auth.test failed: {exc}")
+        return self.bot_user_id
+
+    # --- ticket-drafting posts --------------------------------------------
+
+    async def post_new_draft(self, text: str) -> str | None:
+        """Post a new top-level message that becomes a ticket-draft thread root."""
+        return await self._post_message(text)
+
+    async def post_thread_text(self, thread_ts: str, text: str) -> None:
+        """Post a plain message into a thread."""
+        await self._post_message(text, thread_ts=thread_ts)
+
+    async def post_ticket_buttons(self, thread_ts: str) -> None:
+        """Post Create ticket / Cancel buttons under a ready draft."""
+        blocks = [
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Create ticket"},
+                        "style": "primary",
+                        "action_id": ACTION_CREATE_TICKET,
+                        "value": thread_ts,
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Cancel"},
+                        "action_id": ACTION_CANCEL_TICKET,
+                        "value": thread_ts,
+                    },
+                ],
+            }
+        ]
+        await self._post_message(
+            "This draft looks ready — create it?", blocks, thread_ts=thread_ts
+        )
 
     # --- targeted-mention helpers -----------------------------------------
 

@@ -967,6 +967,14 @@ is no separate control path to keep in sync.
 | `errors` | Agent crash / failure, stall or turn timeout, and max-rework escalations. De-duplicated so a retry storm doesn't spam the channel. |
 | `done` | An issue reaches a terminal state, with a short summary. |
 
+**Create tickets from Slack** (optional, `slack.ticket_creation: true`): @-mention
+the bot in the channel with a rough idea and it opens a thread to draft the
+ticket *with* you — asking clarifying questions and filling in acceptance
+criteria until it's ready. Click **Create ticket** and it files the issue into
+the project's Todo state, where the poll loop picks it up and an agent starts
+on it automatically. Uses the existing message events (no extra scope); with
+multiple projects configured, set `slack.ticket_project` to choose the target.
+
 **Targeted mentions** (optional, `slack.mentions: true`): instead of posting
 silently to the channel, Stokowski @-mentions the **person who created the
 Linear issue** when it reaches the review gate, and pings **everyone who replied

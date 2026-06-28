@@ -1772,6 +1772,8 @@ class MultiOrchestrator:
         self.config: "ServiceConfig | None" = None
         # Shared Slack notifier (created in start() when Slack is configured).
         self.notifier: SlackNotifier | None = None
+        # thread_ts -> ticket-draft state {conversation, draft, slug}
+        self._drafts: dict[str, dict] = {}
         # Eagerly parse config so callers can read server.port etc. before start()
         self._initial_load()
 
@@ -1837,6 +1839,10 @@ class MultiOrchestrator:
                 f"Slack notifications enabled (events={slack_cfg.events}, "
                 f"mentions={slack_cfg.mentions})"
             )
+            if slack_cfg.ticket_creation:
+                # Resolve our own user id up front so @-mentions can be detected.
+                await self.notifier.bot_id()
+                logger.info("Slack ticket creation enabled (@-mention the bot)")
 
         for project in projects:
             orch = Orchestrator(
@@ -1992,6 +1998,126 @@ class MultiOrchestrator:
                 logger.warning(f"Gate conversation errored issue_id={issue_id}: {e}")
         # Fallback: at least capture the message as Linear feedback.
         return await self.handle_thread_feedback(issue_id, text)
+
+    # ── Ticket creation from Slack (#19) ───────────────────────────────────
+
+    def is_draft_thread(self, thread_ts: str) -> bool:
+        """True if this thread is an in-progress ticket draft."""
+        return thread_ts in self._drafts
+
+    def _ticket_target(self) -> "tuple[Orchestrator | None, str]":
+        """Resolve (orchestrator, project_slug) to file new tickets into."""
+        if not self.config:
+            return None, ""
+        slug = (self.config.slack.ticket_project or "").strip()
+        orchs = list(self.orchestrators.values())
+        if slug:
+            for o in orchs:
+                if o.cfg.tracker.project_slug == slug:
+                    return o, slug
+            return (orchs[0] if orchs else None), slug
+        if len(orchs) == 1:
+            return orchs[0], orchs[0].cfg.tracker.project_slug
+        return None, ""  # ambiguous: multiple projects, no ticket_project set
+
+    async def _draft_turn(self, conversation: list[dict]) -> str:
+        """Run one stateless drafting turn and return the model's reply text."""
+        from .drafting import build_draft_prompt
+        from .runner import run_oneshot
+
+        assert self.config is not None
+        return await run_oneshot(self.config.claude, build_draft_prompt(conversation))
+
+    async def start_ticket_draft(self, initial_text: str) -> None:
+        """Begin a conversational ticket draft from an @-mention."""
+        from .drafting import parse_draft
+
+        if not (self.notifier and self.config and self.config.slack.ticket_creation):
+            return
+        _, slug = self._ticket_target()
+        if not slug:
+            await self.notifier.post_new_draft(
+                ":warning: Ticket creation needs `slack.ticket_project` set "
+                "(multiple projects are configured)."
+            )
+            return
+        # Immediate ack so the thread exists and the user gets feedback.
+        ts = await self.notifier.post_new_draft(
+            ":pencil: On it — drafting a ticket from your message…"
+        )
+        if not ts:
+            return
+        conversation = [{"role": "user", "text": initial_text}]
+        self._drafts[ts] = {"conversation": conversation, "draft": {}, "slug": slug}
+        await self._advance_draft(ts)
+
+    async def continue_ticket_draft(self, thread_ts: str, user_text: str) -> None:
+        """Incorporate a reply into an in-progress draft."""
+        st = self._drafts.get(thread_ts)
+        if not st:
+            return
+        st["conversation"].append({"role": "user", "text": user_text})
+        await self._advance_draft(thread_ts)
+
+    async def _advance_draft(self, thread_ts: str) -> None:
+        """Run a drafting turn, post the reply, and offer buttons when ready."""
+        from .drafting import parse_draft
+
+        st = self._drafts.get(thread_ts)
+        if not st or not self.notifier:
+            return
+        reply = await self._draft_turn(st["conversation"])
+        if not reply:
+            await self.notifier.post_thread_text(
+                thread_ts, ":x: Sorry — I hit an error drafting that."
+            )
+            return
+        st["conversation"].append({"role": "assistant", "text": reply})
+        st["draft"] = parse_draft(reply)
+        await self.notifier.post_thread_text(thread_ts, reply)
+        if st["draft"].get("ready"):
+            await self.notifier.post_ticket_buttons(thread_ts)
+
+    async def create_ticket_from_draft(self, thread_ts: str) -> None:
+        """File the drafted ticket into the project's Todo state."""
+        st = self._drafts.get(thread_ts)
+        if not st or not self.notifier or not self.config:
+            return
+        draft = st.get("draft") or {}
+        # `ready` already implies a title and a non-empty body (see parse_draft).
+        if not draft.get("ready"):
+            await self.notifier.post_thread_text(
+                thread_ts,
+                ":warning: The draft isn't ready yet — let's flesh it out a bit more.",
+            )
+            return
+        target_orch, slug = self._ticket_target()
+        if not target_orch or not slug:
+            await self.notifier.post_thread_text(
+                thread_ts, ":warning: Couldn't determine which project to file into."
+            )
+            return
+        client = target_orch._ensure_linear_client()
+        todo = self.config.linear_states.todo
+        issue = await client.create_issue(
+            slug, draft["title"], draft["description"], todo
+        )
+        if issue:
+            self._drafts.pop(thread_ts, None)
+            await self.notifier.post_thread_text(
+                thread_ts,
+                f":white_check_mark: Created *<{issue.url}|{issue.identifier}>* — "
+                f"{issue.title}. The agent will pick it up shortly.",
+            )
+        else:
+            await self.notifier.post_thread_text(
+                thread_ts, ":x: Sorry — failed to create the ticket in Linear."
+            )
+
+    async def cancel_ticket_draft(self, thread_ts: str) -> None:
+        """Discard an in-progress draft."""
+        if self._drafts.pop(thread_ts, None) is not None and self.notifier:
+            await self.notifier.post_thread_text(thread_ts, ":wastebasket: Draft discarded.")
 
     def resolve_workspace(self, issue_identifier: str) -> "Path | None":
         """Resolve an issue identifier to its on-disk workspace path, if present."""

@@ -137,6 +137,31 @@ query($issueId: String!) {
 }
 """
 
+PROJECT_CONTEXT_QUERY = """
+query($projectSlug: String!) {
+  projects(filter: { slugId: { eq: $projectSlug } }, first: 1) {
+    nodes {
+      id
+      teams(first: 1) {
+        nodes {
+          id
+          states { nodes { id name } }
+        }
+      }
+    }
+  }
+}
+"""
+
+ISSUE_CREATE_MUTATION = """
+mutation($input: IssueCreateInput!) {
+  issueCreate(input: $input) {
+    success
+    issue { id identifier title url state { name } }
+  }
+}
+"""
+
 
 def _parse_datetime(val: str | None) -> datetime | None:
     if not val:
@@ -328,6 +353,71 @@ class LinearClient:
         except Exception as e:
             logger.error(f"Failed to fetch comments for {issue_id}: {e}")
             return []
+
+    async def create_issue(
+        self,
+        project_slug: str,
+        title: str,
+        description: str,
+        state_name: str,
+    ) -> Issue | None:
+        """Create an issue in the project's team, in the given state (by name).
+
+        Resolves project → team → state id, then runs issueCreate. Returns the
+        new Issue on success, else None.
+        """
+        try:
+            data = await self._graphql(
+                PROJECT_CONTEXT_QUERY, {"projectSlug": project_slug}
+            )
+            projects = (data.get("projects") or {}).get("nodes") or []
+            if not projects:
+                logger.error(f"Project '{project_slug}' not found for issue creation")
+                return None
+            project = projects[0]
+            project_id = project["id"]
+            teams = (project.get("teams") or {}).get("nodes") or []
+            if not teams:
+                logger.error(f"Project '{project_slug}' has no team")
+                return None
+            team = teams[0]
+            team_id = team["id"]
+
+            state_id = None
+            for s in (team.get("states") or {}).get("nodes") or []:
+                if s.get("name", "").strip().lower() == state_name.strip().lower():
+                    state_id = s["id"]
+                    break
+            if not state_id:
+                logger.error(
+                    f"State '{state_name}' not found for new issue in {project_slug}"
+                )
+                return None
+
+            input_obj = {
+                "teamId": team_id,
+                "projectId": project_id,
+                "title": title,
+                "description": description,
+                "stateId": state_id,
+            }
+            result = await self._graphql(ISSUE_CREATE_MUTATION, {"input": input_obj})
+            payload = result.get("issueCreate", {})
+            if not payload.get("success"):
+                logger.error(f"Linear rejected issue creation in {project_slug}")
+                return None
+            node = payload.get("issue") or {}
+            logger.info(f"Created issue {node.get('identifier')} in {project_slug}")
+            return Issue(
+                id=node["id"],
+                identifier=node.get("identifier", ""),
+                title=node.get("title", title),
+                url=node.get("url"),
+                state=(node.get("state") or {}).get("name", state_name),
+            )
+        except Exception as e:
+            logger.error(f"Failed to create issue in {project_slug}: {e}")
+            return None
 
     async def update_issue_state(self, issue_id: str, state_name: str) -> bool:
         """Move an issue to a new state by name. Returns True on success."""
