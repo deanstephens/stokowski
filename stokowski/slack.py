@@ -293,12 +293,29 @@ class SlackNotifier:
         run: int = 1,
         question: str | None = None,
     ) -> None:
-        text, blocks = build_gate_blocks(issue, gate_state, prompt, run, question)
         # Remember the creator so this and later follow-ups can ping them.
         if issue.creator_email:
             self._issue_creator[issue.id] = issue.creator_email
-        # Ping the creator (and, on a re-review gate, prior thread participants).
+
+        text, blocks = build_gate_blocks(issue, gate_state, prompt, run, question)
+        # Ping the creator (and, on a re-review, prior thread participants).
         mention = await self.mentions_for(issue.id)
+
+        existing = self._issue_thread.get(issue.id)
+        if run > 1 and existing:
+            # Re-review after rework: continue in the SAME thread so the
+            # reviewer gets the update where they sent it back, instead of
+            # orphaning it in a brand-new top-level message/thread.
+            header = f":repeat: {mention}*Back for review after rework* (run {run})"
+            blocks = [
+                {"type": "divider"},
+                {"type": "section", "text": {"type": "mrkdwn", "text": header}},
+            ] + blocks
+            text = f"{header.replace('*', '')}\n{text}"
+            await self._post_message(text, blocks, thread_ts=existing)
+            return  # keep the existing thread mapping
+
+        # First review: a new top-level message starts the thread.
         if mention:
             ping = f":eyes: {mention}— your issue is ready for review"
             blocks = [
