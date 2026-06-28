@@ -15,6 +15,10 @@ All notable changes to Stokowski are documented here.
 - feat: agent Claude Code session ids are now persisted to `.stokowski/session` in each workspace — sessions survive orchestrator restarts and can be resumed from inside the terminal (`claude --resume "$(cat .stokowski/session)"`).
 - feat: **dashboard bearer-token auth** (`server.auth_token` / `--auth-token` / `$STOKOWSKI_AUTH_TOKEN`). Stokowski refuses to bind a non-loopback host without a token unless `--insecure` is passed. Slack callback routes are exempt (signing-secret auth).
 
+### Fixed
+
+- fix: **re-review after rework no longer orphans a new Slack thread** — when an issue comes back from rework and re-enters the gate (`run > 1`), the notification is posted as a `:repeat: Back for review after rework` reply in the *original* thread (pinging the creator + prior participants) instead of starting a disconnected new top-level message. First reviews still start a fresh thread; falls back to a new message if the thread mapping was lost (e.g. after a restart).
+
 ---
 
 ## [0.5.0] - 2026-06-23
