@@ -120,6 +120,11 @@ class SlackConfig:
     # cases where Linear and Slack emails differ.
     mentions: bool = False
     user_map: dict[str, str] = field(default_factory=dict)
+    # When true, @-mentioning the bot in the channel starts a conversational
+    # ticket-drafting flow that files the result into the project's Todo state.
+    ticket_creation: bool = False
+    # Optional project slug to create tickets in (for multi-project setups).
+    ticket_project: str = ""
 
     def resolved_bot_token(self) -> str:
         return _resolve_env(self.bot_token)
@@ -620,6 +625,8 @@ def parse_workflow_file(path: str | Path) -> WorkflowDefinition:
         events=[str(e) for e in slack_events],
         mentions=bool(sl.get("mentions", False)),
         user_map={str(k).lower(): str(v) for k, v in slack_user_map.items()},
+        ticket_creation=bool(sl.get("ticket_creation", False)),
+        ticket_project=str(sl.get("ticket_project", "") or ""),
     )
 
     # Resolve projects list (multi-project) or synthesize from top-level (legacy)

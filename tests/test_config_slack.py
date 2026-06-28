@@ -113,3 +113,19 @@ def test_parse_workflow_slack_mentions(tmp_path: Path):
     assert cfg.slack.mentions is True
     # Keys are lowercased for case-insensitive email matching.
     assert cfg.slack.user_map == {"alice@example.com": "U123"}
+    # Ticket creation defaults off when unspecified.
+    assert cfg.slack.ticket_creation is False
+    assert cfg.slack.ticket_project == ""
+
+
+def test_parse_workflow_slack_ticket_creation(tmp_path: Path):
+    wf = tmp_path / "workflow.yaml"
+    wf.write_text(
+        "tracker:\n  kind: linear\n  api_key: k\n  project_slug: p\n"
+        "slack:\n  enabled: true\n  bot_token: t\n  channel: C1\n"
+        "  ticket_creation: true\n  ticket_project: abc123\n"
+        "states:\n  build:\n    type: agent\n"
+    )
+    cfg = parse_workflow_file(wf).config
+    assert cfg.slack.ticket_creation is True
+    assert cfg.slack.ticket_project == "abc123"

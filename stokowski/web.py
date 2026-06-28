@@ -23,6 +23,8 @@ except ImportError:
 
 from .slack import (
     ACTION_APPROVE,
+    ACTION_CANCEL_TICKET,
+    ACTION_CREATE_TICKET,
     ACTION_REWORK,
     decode_action_value,
     verify_slack_signature,
@@ -1571,7 +1573,15 @@ def create_app(orchestrator: "MultiOrchestrator", auth_token: str = "") -> FastA
         user = user_obj.get("username") or user_obj.get("name") or "someone"
         for action in payload.get("actions", []):
             aid = action.get("action_id")
-            ctx = decode_action_value(action.get("value", ""))
+            raw_value = action.get("value", "")
+            # Ticket-draft buttons carry the draft thread ts as a plain string.
+            if aid == ACTION_CREATE_TICKET:
+                asyncio.create_task(orchestrator.create_ticket_from_draft(raw_value))
+                continue
+            if aid == ACTION_CANCEL_TICKET:
+                asyncio.create_task(orchestrator.cancel_ticket_draft(raw_value))
+                continue
+            ctx = decode_action_value(raw_value)
             issue_id = ctx.get("issue")
             if not issue_id:
                 continue
@@ -1604,7 +1614,7 @@ def create_app(orchestrator: "MultiOrchestrator", auth_token: str = "") -> FastA
         if data.get("type") == "url_verification":
             return JSONResponse({"challenge": data.get("challenge", "")})
         event = data.get("event", {}) or {}
-        # Only human messages that are replies in a tracked gate thread.
+        # Only human messages (no bot echoes, no edits/joins/etc.).
         if (
             event.get("type") == "message"
             and not event.get("bot_id")
@@ -1613,7 +1623,13 @@ def create_app(orchestrator: "MultiOrchestrator", auth_token: str = "") -> FastA
             thread_ts = event.get("thread_ts")
             text = (event.get("text") or "").strip()
             notifier = orchestrator.notifier
-            if thread_ts and text and notifier:
+            cfg = orchestrator.config
+            if thread_ts and text and orchestrator.is_draft_thread(thread_ts):
+                # A reply in an in-progress ticket draft.
+                asyncio.create_task(
+                    orchestrator.continue_ticket_draft(thread_ts, text)
+                )
+            elif thread_ts and text and notifier:
                 issue_id = notifier.issue_for_thread(thread_ts)
                 if issue_id:
                     # Remember who replied so follow-ups can ping them.
@@ -1623,6 +1639,18 @@ def create_app(orchestrator: "MultiOrchestrator", auth_token: str = "") -> FastA
                     # Have the agent converse in-thread (falls back to filing a
                     # comment if a conversational turn isn't possible).
                     asyncio.create_task(orchestrator.converse(issue_id, text))
+            elif (
+                not thread_ts
+                and text
+                and notifier
+                and cfg
+                and cfg.slack.ticket_creation
+            ):
+                # Top-level message: start a ticket draft if it @-mentions us.
+                bot_uid = await notifier.bot_id()
+                if bot_uid and f"<@{bot_uid}>" in text:
+                    idea = text.replace(f"<@{bot_uid}>", "").strip()
+                    asyncio.create_task(orchestrator.start_ticket_draft(idea))
         return JSONResponse({"ok": True})
 
     # ── Interactive remote terminal ────────────────────────────────────────

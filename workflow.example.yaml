@@ -189,6 +189,13 @@ slack:
   # Optional: override email -> Slack user id when Linear and Slack emails
   # differ (otherwise resolved automatically via users.lookupByEmail).
   user_map: {}                         # e.g. { alice@example.com: U012ABC }
+  # Conversational ticket creation: @-mention the bot in the channel to draft a
+  # ticket with the AI; clicking "Create ticket" files it into the project's
+  # Todo state (where the daemon picks it up). Uses the existing message events;
+  # no extra Slack scope. Default off.
+  ticket_creation: false
+  # Which project to file drafted tickets into (only needed with >1 project).
+  ticket_project: ""                   # e.g. 19792a40bf71
 
 # ---------------------------------------------------------------------------
 # State machine

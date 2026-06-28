@@ -63,6 +63,69 @@ def build_claude_args(
     return args
 
 
+async def run_oneshot(
+    claude_cfg: ClaudeConfig,
+    prompt: str,
+    *,
+    env: dict[str, str] | None = None,
+    timeout_ms: int = 120_000,
+) -> str:
+    """Run a single stateless `claude -p` turn and return its result text.
+
+    For lightweight reasoning that needs no workspace, session, or tools (e.g.
+    drafting a ticket conversationally). Returns "" on any failure.
+    """
+    import tempfile
+
+    args = [
+        claude_cfg.command, "-p", prompt,
+        "--verbose", "--output-format", "stream-json",
+    ]
+    if claude_cfg.model:
+        args.extend(["--model", claude_cfg.model])
+    args.extend([
+        "--append-system-prompt",
+        "You are running headlessly via Stokowski. Do NOT use tools, skills, "
+        "slash commands, or plan mode. Respond directly with text only.",
+    ])
+
+    with tempfile.TemporaryDirectory(prefix="stok-oneshot-") as tmp:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args, cwd=tmp,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+                limit=10 * 1024 * 1024,
+            )
+        except Exception as e:
+            logger.error(f"oneshot launch failed: {e}")
+            return ""
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout_ms / 1000
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            logger.error("oneshot timed out")
+            return ""
+        if proc.returncode != 0:
+            logger.error(f"oneshot rc={proc.returncode}: {stderr.decode()[:300]}")
+            return ""
+        result_text = ""
+        for line in stdout.decode().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if ev.get("type") == "result" and isinstance(ev.get("result"), str):
+                result_text = ev["result"]
+        return result_text.strip()
+
+
 def build_codex_args(
     model: str | None,
     prompt: str,
