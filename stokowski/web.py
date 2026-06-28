@@ -1399,8 +1399,31 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 """
 
 
+class _EventDedup:
+    """Bounded de-dup of Slack event_ids (retries reuse the same event_id)."""
+
+    def __init__(self, maxlen: int = 2000):
+        self._q: deque[str] = deque(maxlen=maxlen)
+        self._set: set[str] = set()
+
+    def is_duplicate(self, event_id: str | None) -> bool:
+        if not event_id:
+            return False
+        if event_id in self._set:
+            return True
+        if len(self._q) == self._q.maxlen:
+            self._set.discard(self._q[0])  # oldest is about to be evicted
+        self._q.append(event_id)
+        self._set.add(event_id)
+        return False
+
+
 def create_app(orchestrator: "MultiOrchestrator", auth_token: str = "") -> FastAPI:
     app = FastAPI(title="Stokowski", version="0.1.0")
+
+    # Slack re-delivers an event if it doesn't get a 200 fast enough; de-dup by
+    # the stable event_id so a retry doesn't, e.g., start a second ticket draft.
+    _event_dedup = _EventDedup()
 
     log_buffer = LogBuffer(maxlen=500)
     _handler = LogCaptureHandler(log_buffer)
@@ -1613,6 +1636,9 @@ def create_app(orchestrator: "MultiOrchestrator", auth_token: str = "") -> FastA
             return JSONResponse({"ok": True})
         if data.get("type") == "url_verification":
             return JSONResponse({"challenge": data.get("challenge", "")})
+        # Drop Slack retries (same event_id) so we don't double-handle.
+        if _event_dedup.is_duplicate(data.get("event_id")):
+            return JSONResponse({"ok": True})
         event = data.get("event", {}) or {}
         # Only human messages (no bot echoes, no edits/joins/etc.).
         if (
