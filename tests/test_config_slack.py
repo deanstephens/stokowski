@@ -95,3 +95,21 @@ def test_parse_workflow_slack_defaults(tmp_path: Path):
     assert cfg.slack.enabled is False
     assert cfg.slack.events == ["gates", "errors", "done"]
     assert cfg.server.auth_token == ""
+    # Mentions default off, empty user map.
+    assert cfg.slack.mentions is False
+    assert cfg.slack.user_map == {}
+
+
+def test_parse_workflow_slack_mentions(tmp_path: Path):
+    wf = tmp_path / "workflow.yaml"
+    wf.write_text(
+        "tracker:\n  kind: linear\n  api_key: k\n  project_slug: p\n"
+        "slack:\n  enabled: true\n  bot_token: t\n  channel: C1\n"
+        "  mentions: true\n"
+        "  user_map:\n    Alice@Example.com: U123\n"
+        "states:\n  build:\n    type: agent\n"
+    )
+    cfg = parse_workflow_file(wf).config
+    assert cfg.slack.mentions is True
+    # Keys are lowercased for case-insensitive email matching.
+    assert cfg.slack.user_map == {"alice@example.com": "U123"}

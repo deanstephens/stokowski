@@ -1599,6 +1599,10 @@ def create_app(orchestrator: "MultiOrchestrator", auth_token: str = "") -> FastA
             if thread_ts and text and notifier:
                 issue_id = notifier.issue_for_thread(thread_ts)
                 if issue_id:
+                    # Remember who replied so follow-ups can ping them.
+                    sender = event.get("user")
+                    if sender:
+                        notifier.record_participant(thread_ts, sender)
                     # Have the agent converse in-thread (falls back to filing a
                     # comment if a conversational turn isn't possible).
                     asyncio.create_task(orchestrator.converse(issue_id, text))

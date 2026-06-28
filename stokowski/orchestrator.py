@@ -1795,8 +1795,13 @@ class MultiOrchestrator:
                 bot_token=slack_cfg.resolved_bot_token(),
                 channel=slack_cfg.resolved_channel(),
                 signing_secret=slack_cfg.resolved_signing_secret(),
+                mentions=slack_cfg.mentions,
+                user_map=slack_cfg.user_map,
             )
-            logger.info(f"Slack notifications enabled (events={slack_cfg.events})")
+            logger.info(
+                f"Slack notifications enabled (events={slack_cfg.events}, "
+                f"mentions={slack_cfg.mentions})"
+            )
 
         for project in projects:
             orch = Orchestrator(

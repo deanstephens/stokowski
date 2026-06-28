@@ -37,6 +37,7 @@ query($projectSlug: String!, $states: [String!]!, $after: String) {
       createdAt
       updatedAt
       state { name }
+      creator { email name }
       labels { nodes { name } }
       inverseRelations {
         nodes {
@@ -191,6 +192,8 @@ def _normalize_issue(node: dict) -> Issue:
         blocked_by=blockers,
         created_at=_parse_datetime(node.get("createdAt")),
         updated_at=_parse_datetime(node.get("updatedAt")),
+        creator_email=(node.get("creator") or {}).get("email"),
+        creator_name=(node.get("creator") or {}).get("name"),
     )
 
 

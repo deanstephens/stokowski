@@ -114,6 +114,12 @@ class SlackConfig:
     signing_secret: str = ""
     channel: str = ""
     events: list[str] = field(default_factory=lambda: ["gates", "errors", "done"])
+    # When true, @-mention the issue creator at the gate and thread
+    # participants on follow-ups. Requires Slack scopes users:read +
+    # users:read.email. `user_map` overrides email->Slack-id resolution for
+    # cases where Linear and Slack emails differ.
+    mentions: bool = False
+    user_map: dict[str, str] = field(default_factory=dict)
 
     def resolved_bot_token(self) -> str:
         return _resolve_env(self.bot_token)
@@ -603,12 +609,17 @@ def parse_workflow_file(path: str | Path) -> WorkflowDefinition:
     slack_events = sl.get("events")
     if not isinstance(slack_events, list) or not slack_events:
         slack_events = ["gates", "errors", "done"]
+    slack_user_map = sl.get("user_map") or {}
+    if not isinstance(slack_user_map, dict):
+        slack_user_map = {}
     slack = SlackConfig(
         enabled=bool(sl.get("enabled", False)),
         bot_token=str(sl.get("bot_token", "") or ""),
         signing_secret=str(sl.get("signing_secret", "") or ""),
         channel=str(sl.get("channel", "") or ""),
         events=[str(e) for e in slack_events],
+        mentions=bool(sl.get("mentions", False)),
+        user_map={str(k).lower(): str(v) for k, v in slack_user_map.items()},
     )
 
     # Resolve projects list (multi-project) or synthesize from top-level (legacy)

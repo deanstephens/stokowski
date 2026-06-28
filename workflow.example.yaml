@@ -182,6 +182,13 @@ slack:
     - gates
     - errors
     - done
+  # Targeted @-mentions: ping the issue creator at the review gate, and anyone
+  # who replied in the gate thread on follow-ups. Needs Slack scopes
+  # users:read + users:read.email. Default off.
+  mentions: false
+  # Optional: override email -> Slack user id when Linear and Slack emails
+  # differ (otherwise resolved automatically via users.lookupByEmail).
+  user_map: {}                         # e.g. { alice@example.com: U012ABC }
 
 # ---------------------------------------------------------------------------
 # State machine
